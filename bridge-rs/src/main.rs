@@ -16,8 +16,70 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use clap::Parser;
 use dispatcher::dispatch;
-use protocol::{AgentSource, BridgeProfile};
+use protocol::{AgentSource, BridgeProfile, PermissionDecision};
 use serde_json::Value;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BridgeLogLevel {
+    Off,
+    Error,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl BridgeLogLevel {
+    fn from_str(value: &str) -> Self {
+        match value.to_ascii_lowercase().as_str() {
+            "off" => Self::Off,
+            "error" => Self::Error,
+            "debug" => Self::Debug,
+            "trace" => Self::Trace,
+            _ => Self::Info,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BridgeLogConfig {
+    enabled: bool,
+    level: BridgeLogLevel,
+    path: String,
+}
+
+impl BridgeLogConfig {
+    fn from_env() -> Self {
+        Self {
+            enabled: env_flag("AGENT_ISLAND_BRIDGE_LOG_ENABLED").unwrap_or(true),
+            level: std::env::var("AGENT_ISLAND_BRIDGE_LOG_LEVEL")
+                .map(|value| BridgeLogLevel::from_str(&value))
+                .unwrap_or(BridgeLogLevel::Info),
+            path: bridge_log_path(),
+        }
+    }
+
+    fn from_profile(profile: &BridgeProfile) -> Self {
+        let mut config = Self::from_env();
+
+        if let Ok(value) = std::env::var("AGENT_ISLAND_BRIDGE_LOG_ENABLED") {
+            config.enabled = env_flag_value(&value).unwrap_or(profile.bridge_log_enabled);
+        } else {
+            config.enabled = profile.bridge_log_enabled;
+        }
+
+        if let Ok(value) = std::env::var("AGENT_ISLAND_BRIDGE_LOG_LEVEL") {
+            config.level = BridgeLogLevel::from_str(&value);
+        } else {
+            config.level = BridgeLogLevel::from_str(&profile.bridge_log_level);
+        }
+
+        config
+    }
+
+    fn should_log(&self, level: BridgeLogLevel) -> bool {
+        self.enabled && self.level != BridgeLogLevel::Off && level <= self.level
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "agent-island-bridge")]
@@ -35,16 +97,23 @@ struct Cli {
 
 fn main() {
     let pid = process::id();
-    log_process_event("start", pid, None);
+    let startup_log_config = BridgeLogConfig::from_env();
+    log_process_event(&startup_log_config, BridgeLogLevel::Info, "start", pid, None);
 
     if let Err(error) = run() {
         let error_text = format!("{error:#}");
-        log_process_event("error", pid, Some(&error_text));
+        log_process_event(
+            &startup_log_config,
+            BridgeLogLevel::Error,
+            "error",
+            pid,
+            Some(&error_text),
+        );
         eprintln!("{error_text}");
         process::exit(1);
     }
 
-    log_process_event("exit", pid, Some("ok"));
+    log_process_event(&startup_log_config, BridgeLogLevel::Info, "exit", pid, Some("ok"));
 }
 
 fn run() -> Result<()> {
@@ -58,9 +127,12 @@ fn run() -> Result<()> {
 
     let input: Value = serde_json::from_str(&stdin_json).context("invalid stdin json")?;
     let profile = load_profile(cli.profile, source)?;
+    let log_config = BridgeLogConfig::from_profile(&profile);
     let adapter = adapter::adapter_for(source);
     let dispatch_result = dispatch(source, &input, &profile);
     log_bridge_event(
+        &log_config,
+        BridgeLogLevel::Debug,
         source.as_str(),
         "received",
         input.get("hook_event_name").and_then(Value::as_str),
@@ -81,13 +153,20 @@ fn run() -> Result<()> {
         socket_client::send_async(&cli.socket, &payload)?;
 
         if let Some(response) = adapter.map_permission_response(
-            Some(permission_decision),
-            Some("Auto-approved from Agent Island"),
+            &PermissionDecision {
+                decision: Some(permission_decision.to_string()),
+                reason: Some("Auto-approved from Agent Island".to_string()),
+                message: None,
+                should_continue: None,
+                stop_reason: None,
+                patch: None,
+            },
             &hook_event
         ) {
             let response_text = serde_json::to_string(&response.body)?;
             println!("{}", response_text);
             log_permission_response(
+                &log_config,
                 source.as_str(),
                 &hook_event,
                 permission_decision,
@@ -101,6 +180,7 @@ fn run() -> Result<()> {
             }
         } else {
             log_permission_response(
+                &log_config,
                 source.as_str(),
                 &hook_event,
                 permission_decision,
@@ -111,14 +191,11 @@ fn run() -> Result<()> {
         }
     } else if status == adapter::HOOK_STATUS_WAITING_FOR_APPROVAL {
         let decision = socket_client::send_sync(&cli.socket, &payload)?;
-        if let Some(response) = adapter.map_permission_response(
-            decision.decision.as_deref(),
-            decision.reason.as_deref(),
-            &hook_event
-        ) {
+        if let Some(response) = adapter.map_permission_response(&decision, &hook_event) {
             let response_text = serde_json::to_string(&response.body)?;
             println!("{}", response_text);
             log_permission_response(
+                &log_config,
                 source.as_str(),
                 &hook_event,
                 decision.decision.as_deref().unwrap_or("none"),
@@ -132,12 +209,22 @@ fn run() -> Result<()> {
             }
         } else {
             log_permission_response(
+                &log_config,
                 source.as_str(),
                 &hook_event,
                 decision.decision.as_deref().unwrap_or("none"),
                 payload.tool_use_id.as_deref(),
                 input.get("turn_id").and_then(Value::as_str),
-                "<no-output>",
+                &format!(
+                    "<no-output> message={} continue={} stop_reason={} patch={}",
+                    decision.message.as_deref().unwrap_or(""),
+                    decision
+                        .should_continue
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    decision.stop_reason.as_deref().unwrap_or(""),
+                    decision.has_patch(),
+                ),
             );
         }
     } else {
@@ -148,6 +235,7 @@ fn run() -> Result<()> {
 }
 
 fn log_permission_response(
+    log_config: &BridgeLogConfig,
     source: &str,
     hook_event: &str,
     decision: &str,
@@ -156,6 +244,8 @@ fn log_permission_response(
     response_text: &str,
 ) {
     log_bridge_event(
+        log_config,
+        BridgeLogLevel::Info,
         source,
         "responded",
         Some(hook_event),
@@ -167,6 +257,8 @@ fn log_permission_response(
 }
 
 fn log_bridge_event(
+    log_config: &BridgeLogConfig,
+    level: BridgeLogLevel,
     source: &str,
     stage: &str,
     event: Option<&str>,
@@ -175,8 +267,11 @@ fn log_bridge_event(
     stdin_body: Option<&str>,
     extra: Option<&str>,
 ) {
-    let log_path = bridge_log_path();
-    let mut file = match OpenOptions::new().create(true).append(true).open(&log_path) {
+    if !log_config.should_log(level) {
+        return;
+    }
+
+    let mut file = match OpenOptions::new().create(true).append(true).open(&log_config.path) {
         Ok(file) => file,
         Err(_) => return,
     };
@@ -187,8 +282,9 @@ fn log_bridge_event(
 
     let _ = writeln!(
         file,
-        "ts={} source={} stage={} event={} tool_use_id={} turn_id={} stdin_sha={} extra_sha={} body={} extra={}",
+        "ts={} level={:?} source={} stage={} event={} tool_use_id={} turn_id={} stdin_sha={} extra_sha={} body={} extra={}",
         ts,
+        level,
         source,
         stage,
         event.unwrap_or(""),
@@ -201,9 +297,18 @@ fn log_bridge_event(
     );
 }
 
-fn log_process_event(stage: &str, pid: u32, extra: Option<&str>) {
-    let log_path = bridge_log_path();
-    let mut file = match OpenOptions::new().create(true).append(true).open(&log_path) {
+fn log_process_event(
+    log_config: &BridgeLogConfig,
+    level: BridgeLogLevel,
+    stage: &str,
+    pid: u32,
+    extra: Option<&str>,
+) {
+    if !log_config.should_log(level) {
+        return;
+    }
+
+    let mut file = match OpenOptions::new().create(true).append(true).open(&log_config.path) {
         Ok(file) => file,
         Err(_) => return,
     };
@@ -213,13 +318,26 @@ fn log_process_event(stage: &str, pid: u32, extra: Option<&str>) {
 
     let _ = writeln!(
         file,
-        "ts={} source=bridge stage={} pid={} extra_sha={} extra={}",
+        "ts={} level={:?} source=bridge stage={} pid={} extra_sha={} extra={}",
         ts,
+        level,
         stage,
         pid,
         extra_sha.unwrap_or_default(),
         extra.unwrap_or(""),
     );
+}
+
+fn env_flag(key: &str) -> Option<bool> {
+    std::env::var(key).ok().and_then(|value| env_flag_value(&value))
+}
+
+fn env_flag_value(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn timestamp_millis() -> u128 {
@@ -241,9 +359,9 @@ fn bridge_log_path() -> String {
     }
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let directory = format!("{home}/.agent-island");
+    let directory = format!("{home}/Library/Application Support/AgentIsland/Logs");
     let _ = fs::create_dir_all(&directory);
-    format!("{directory}/bridge-debug.log")
+    format!("{directory}/bridge.log")
 }
 
 fn read_stdin_json() -> Result<String> {
@@ -259,7 +377,7 @@ fn read_stdin_json() -> Result<String> {
 fn load_profile(path: Option<PathBuf>, source: AgentSource) -> Result<BridgeProfile> {
     let path = path.unwrap_or_else(|| {
         PathBuf::from(format!(
-            "{}/.agent-island/bridge-profiles/{}.json",
+            "{}/Library/Application Support/AgentIsland/Runtime/bridge-profiles/{}.json",
             std::env::var("HOME").unwrap_or_default(),
             source.as_str()
         ))
@@ -272,6 +390,8 @@ fn load_profile(path: Option<PathBuf>, source: AgentSource) -> Result<BridgeProf
             approval_command_patterns: vec![],
             auto_approve_tools: vec![],
             auto_approve_command_patterns: vec![],
+            bridge_log_enabled: true,
+            bridge_log_level: "info".to_string(),
         });
     }
 
@@ -284,13 +404,23 @@ fn load_profile(path: Option<PathBuf>, source: AgentSource) -> Result<BridgeProf
 #[cfg(test)]
 mod tests {
     use crate::adapter::adapter_for;
-    use crate::protocol::AgentSource;
+    use crate::protocol::{AgentSource, PermissionDecision};
 
     #[test]
     fn claude_permission_allow_response_matches_official_shape() {
         let adapter = adapter_for(AgentSource::Claude);
         let response = adapter
-            .map_permission_response(Some("allow"), None, "PermissionRequest")
+            .map_permission_response(
+                &PermissionDecision {
+                    decision: Some("allow".to_string()),
+                    reason: None,
+                    message: None,
+                    should_continue: None,
+                    stop_reason: None,
+                    patch: None,
+                },
+                "PermissionRequest",
+            )
             .expect("expected response");
         let body = response.body;
 
@@ -308,7 +438,17 @@ mod tests {
     fn claude_permission_deny_response_matches_official_shape() {
         let adapter = adapter_for(AgentSource::Claude);
         let response = adapter
-            .map_permission_response(Some("deny"), Some("Nope"), "PermissionRequest")
+            .map_permission_response(
+                &PermissionDecision {
+                    decision: Some("deny".to_string()),
+                    reason: Some("Nope".to_string()),
+                    message: None,
+                    should_continue: None,
+                    stop_reason: None,
+                    patch: None,
+                },
+                "PermissionRequest",
+            )
             .expect("expected response");
         let body = response.body;
 
@@ -329,7 +469,17 @@ mod tests {
     #[test]
     fn codex_permission_response_matches_official_shape() {
         let adapter = adapter_for(AgentSource::Codex);
-        let response = adapter.map_permission_response(Some("allow"), Some("Approved"), "PreToolUse");
+        let response = adapter.map_permission_response(
+            &PermissionDecision {
+                decision: Some("allow".to_string()),
+                reason: Some("Approved".to_string()),
+                message: None,
+                should_continue: None,
+                stop_reason: None,
+                patch: None,
+            },
+            "PreToolUse",
+        );
         assert!(response.is_none());
     }
 
@@ -337,7 +487,17 @@ mod tests {
     fn codex_deny_response_matches_block_shape() {
         let adapter = adapter_for(AgentSource::Codex);
         let response = adapter
-            .map_permission_response(Some("deny"), Some("Denied"), "PreToolUse")
+            .map_permission_response(
+                &PermissionDecision {
+                    decision: Some("deny".to_string()),
+                    reason: Some("Denied".to_string()),
+                    message: None,
+                    should_continue: None,
+                    stop_reason: None,
+                    patch: None,
+                },
+                "PreToolUse",
+            )
             .expect("expected response");
         let body = response.body;
 
@@ -359,7 +519,17 @@ mod tests {
     fn gemini_deny_response_matches_official_shape() {
         let adapter = adapter_for(AgentSource::Gemini);
         let response = adapter
-            .map_permission_response(Some("deny"), Some("Denied"), "BeforeTool")
+            .map_permission_response(
+                &PermissionDecision {
+                    decision: Some("deny".to_string()),
+                    reason: Some("Denied".to_string()),
+                    message: None,
+                    should_continue: None,
+                    stop_reason: None,
+                    patch: None,
+                },
+                "BeforeTool",
+            )
             .expect("expected response");
         let body = response.body;
 
@@ -370,7 +540,60 @@ mod tests {
     #[test]
     fn gemini_allow_has_no_response_body() {
         let adapter = adapter_for(AgentSource::Gemini);
-        let response = adapter.map_permission_response(Some("allow"), None, "BeforeTool");
+        let response = adapter.map_permission_response(
+            &PermissionDecision {
+                    decision: Some("allow".to_string()),
+                    reason: None,
+                    message: None,
+                    should_continue: None,
+                    stop_reason: None,
+                    patch: None,
+                },
+                "BeforeTool",
+            );
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn claude_permission_deny_prefers_message_field() {
+        let adapter = adapter_for(AgentSource::Claude);
+        let response = adapter
+            .map_permission_response(
+                &PermissionDecision {
+                    decision: Some("deny".to_string()),
+                    reason: None,
+                    message: Some("Stop here".to_string()),
+                    should_continue: Some(false),
+                    stop_reason: Some("user_denied".to_string()),
+                    patch: None,
+                },
+                "PermissionRequest",
+            )
+            .expect("expected response");
+        let body = response.body;
+
+        assert_eq!(
+            body["hookSpecificOutput"]["decision"]["message"].as_str(),
+            Some("Stop here")
+        );
+    }
+
+    #[test]
+    fn gemini_allow_with_patch_still_has_no_response_body() {
+        let adapter = adapter_for(AgentSource::Gemini);
+        let response = adapter.map_permission_response(
+            &PermissionDecision {
+                decision: Some("allow".to_string()),
+                reason: None,
+                message: None,
+                should_continue: None,
+                stop_reason: None,
+                patch: Some(serde_json::json!({
+                    "toolArguments": { "command": "echo ok" }
+                })),
+            },
+            "BeforeTool",
+        );
         assert!(response.is_none());
     }
 }

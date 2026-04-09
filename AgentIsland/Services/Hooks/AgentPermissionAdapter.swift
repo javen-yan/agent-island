@@ -37,18 +37,11 @@ private struct ClaudePermissionAdapter: AgentPermissionAdapter {
     let agentType: AgentPlatform = .claude
 
     func shouldCacheToolUseId(for event: HookEvent) -> Bool {
-        if event.internalEventValue == .toolWillRun {
-            return true
-        }
-        if !event.hasInternalProtocol, case .preToolUse = event.domainEvent {
-            return true
-        }
-        return false
+        event.unifiedEvent.kind == .toolStarted
     }
 
     func shouldAwaitPermissionResponse(for event: HookEvent) -> Bool {
-        event.internalEventValue == .permissionRequested
-            || (!event.hasInternalProtocol && event.shouldAwaitPermissionResponse)
+        event.unifiedEvent.kind == .permissionRequested
     }
 
     func resolveToolUseId(
@@ -68,8 +61,7 @@ private struct CodexPermissionAdapter: AgentPermissionAdapter {
     }
 
     func shouldAwaitPermissionResponse(for event: HookEvent) -> Bool {
-        event.internalEventValue == .permissionRequested
-            || (!event.hasInternalProtocol && event.shouldAwaitPermissionResponse)
+        event.unifiedEvent.kind == .permissionRequested && event.permissionModeValue == .nativeApp
     }
 
     func resolveToolUseId(
@@ -89,8 +81,7 @@ private struct GeminiPermissionAdapter: AgentPermissionAdapter {
     }
 
     func shouldAwaitPermissionResponse(for event: HookEvent) -> Bool {
-        event.internalEventValue == .permissionRequested
-            || (!event.hasInternalProtocol && event.shouldAwaitPermissionResponse)
+        event.unifiedEvent.kind == .permissionRequested
     }
 
     func resolveToolUseId(

@@ -69,6 +69,8 @@ mod tests {
             approval_command_patterns: vec![],
             auto_approve_tools: vec![],
             auto_approve_command_patterns: vec![],
+            bridge_log_enabled: true,
+            bridge_log_level: "info".to_string(),
         }
     }
 
@@ -99,14 +101,14 @@ mod tests {
     }
 
     #[test]
-    fn codex_pre_tool_use_maps_to_internal_permission_event() {
+    fn codex_pre_tool_use_maps_to_running_tool_without_permission_prompt() {
         let input = json!({
             "session_id": "codex-session",
             "cwd": "/tmp/project",
             "method": "PreToolUse",
             "params": {
                 "name": "Bash",
-                "command": "rm -rf /tmp/demo",
+                "command": "sed -n '1,40p' file.txt",
                 "callId": "codex-call-123"
             }
         });
@@ -115,9 +117,9 @@ mod tests {
         let payload = result.payload.expect("expected payload");
 
         assert_eq!(payload.event, "PreToolUse");
-        assert_eq!(payload.internal_event, INTERNAL_EVENT_PERMISSION_REQUESTED);
-        assert_eq!(payload.status, HOOK_STATUS_WAITING_FOR_APPROVAL);
-        assert_eq!(payload.permission_mode.as_deref(), Some("native_app"));
+        assert_eq!(payload.internal_event, crate::adapter::INTERNAL_EVENT_TOOL_WILL_RUN);
+        assert_eq!(payload.status, crate::adapter::HOOK_STATUS_RUNNING_TOOL);
+        assert_eq!(payload.permission_mode, None);
         assert_eq!(
             payload.extra.get("officialPermissionEvent").and_then(|v| v.as_str()),
             Some("PreToolUse")
@@ -126,6 +128,23 @@ mod tests {
             payload.extra.get("toolMatcher").and_then(|v| v.as_str()),
             Some("Bash")
         );
+    }
+
+    #[test]
+    fn codex_read_tool_event_is_filtered_out() {
+        let input = json!({
+            "session_id": "codex-session",
+            "cwd": "/tmp/project",
+            "method": "PreToolUse",
+            "params": {
+                "name": "Read",
+                "file_path": "/tmp/demo.txt",
+                "callId": "codex-call-read"
+            }
+        });
+
+        let result = dispatch(AgentSource::Codex, &input, &empty_profile());
+        assert!(result.payload.is_none());
     }
 
     #[test]
@@ -189,6 +208,8 @@ mod tests {
             approval_command_patterns: vec![],
             auto_approve_tools: vec![],
             auto_approve_command_patterns: vec![r"^npm test$".to_string()],
+            bridge_log_enabled: true,
+            bridge_log_level: "info".to_string(),
         };
 
         let result = dispatch(AgentSource::Codex, &input, &profile);
@@ -203,5 +224,91 @@ mod tests {
             payload.extra.get("autoApproved").and_then(|v| v.as_bool()),
             Some(true)
         );
+    }
+
+    #[test]
+    fn codex_escalation_alone_does_not_trigger_permission_prompt() {
+        let input = json!({
+            "session_id": "codex-session",
+            "cwd": "/tmp/project",
+            "method": "PreToolUse",
+            "params": {
+                "name": "Bash",
+                "command": "sed -n '1,120p' file.txt",
+                "callId": "codex-call-456",
+                "with_escalated_permissions": true
+            }
+        });
+
+        let profile = BridgeProfile {
+            response_mode: Some("codex".to_string()),
+            approval_tools: vec![],
+            approval_command_patterns: vec![],
+            auto_approve_tools: vec![],
+            auto_approve_command_patterns: vec![],
+            bridge_log_enabled: true,
+            bridge_log_level: "info".to_string(),
+        };
+
+        let result = dispatch(AgentSource::Codex, &input, &profile);
+        let payload = result.payload.expect("expected payload");
+
+        assert_eq!(result.permission_decision, None);
+        assert_eq!(payload.status, crate::adapter::HOOK_STATUS_RUNNING_TOOL);
+        assert_eq!(payload.internal_event, crate::adapter::INTERNAL_EVENT_TOOL_WILL_RUN);
+        assert_eq!(payload.permission_mode, None);
+    }
+
+    #[test]
+    fn codex_safe_pre_tool_use_stays_running_tool() {
+        let input = json!({
+            "session_id": "codex-session",
+            "cwd": "/tmp/project",
+            "method": "PreToolUse",
+            "params": {
+                "name": "Bash",
+                "command": "rg TODO src",
+                "callId": "codex-call-safe"
+            }
+        });
+
+        let result = dispatch(AgentSource::Codex, &input, &empty_profile());
+        let payload = result.payload.expect("expected payload");
+
+        assert_eq!(payload.status, crate::adapter::HOOK_STATUS_RUNNING_TOOL);
+        assert_eq!(payload.internal_event, crate::adapter::INTERNAL_EVENT_TOOL_WILL_RUN);
+        assert_eq!(payload.permission_mode, None);
+    }
+
+    #[test]
+    fn codex_dangerous_command_maps_to_terminal_confirmation_state() {
+        let input = json!({
+            "session_id": "codex-session",
+            "cwd": "/tmp/project",
+            "method": "PreToolUse",
+            "params": {
+                "name": "Bash",
+                "command": "rm -rf /tmp/demo",
+                "callId": "codex-call-danger"
+            }
+        });
+
+        let profile = BridgeProfile {
+            response_mode: Some("codex".to_string()),
+            approval_tools: vec!["Bash".to_string()],
+            approval_command_patterns: vec![r".+".to_string()],
+            auto_approve_tools: vec![],
+            auto_approve_command_patterns: vec![],
+            bridge_log_enabled: true,
+            bridge_log_level: "info".to_string(),
+        };
+
+        let result = dispatch(AgentSource::Codex, &input, &profile);
+        let payload = result.payload.expect("expected payload");
+
+        assert_eq!(result.permission_decision, None);
+        assert_eq!(payload.status, crate::adapter::HOOK_STATUS_WAITING_FOR_APPROVAL);
+        assert_eq!(payload.internal_event, crate::adapter::INTERNAL_EVENT_PERMISSION_REQUESTED);
+        assert_eq!(payload.permission_mode.as_deref(), Some("terminal"));
     }
 }

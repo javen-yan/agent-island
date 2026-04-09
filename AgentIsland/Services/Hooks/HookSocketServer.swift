@@ -72,7 +72,7 @@ struct RawHookEvent: Codable, Sendable {
 /// - `internalEvent` is the primary field for AgentIsland business logic.
 /// - `permissionMode` normalizes how a decision should be handled.
 /// - `extra` carries agent-specific details that should not expand the core model.
-/// - `event` remains available as the raw official hook event for diagnostics and fallback.
+/// - `event` remains available only for diagnostics and legacy translation fallback.
 struct HookEvent: Sendable {
     let sessionId: String
     let cwd: String
@@ -191,16 +191,74 @@ struct HookEvent: Sendable {
         case nativeApp = "native_app"
         case terminal = "terminal"
     }
-
-    nonisolated var hasInternalProtocol: Bool {
-        internalEventValue != .unknown
-    }
 }
 
-/// Response to send back to the hook
+/// Response to send back to the hook.
+/// The wire format stays backward-compatible with the legacy `decision/reason`
+/// contract while exposing the wider unified action model to Swift callers.
 struct HookResponse: Codable {
-    let decision: String // "allow", "deny", or "ask"
+    let decision: String
     let reason: String?
+    let version: String?
+    let actionId: String?
+    let targetEventId: String?
+    let message: String?
+    let `continue`: Bool?
+    let stopReason: String?
+    let patch: UnifiedAgentAction.Patch?
+    let metadata: [String: String]?
+
+    init(
+        decision: String,
+        reason: String? = nil,
+        version: String? = nil,
+        actionId: String? = nil,
+        targetEventId: String? = nil,
+        message: String? = nil,
+        `continue`: Bool? = nil,
+        stopReason: String? = nil,
+        patch: UnifiedAgentAction.Patch? = nil,
+        metadata: [String: String]? = nil
+    ) {
+        self.decision = decision
+        self.reason = reason
+        self.version = version
+        self.actionId = actionId
+        self.targetEventId = targetEventId
+        self.message = message
+        self.continue = `continue`
+        self.stopReason = stopReason
+        self.patch = patch
+        self.metadata = metadata
+    }
+
+    init(action: UnifiedAgentAction) {
+        self.init(
+            decision: action.decision.rawValue,
+            reason: action.message,
+            version: action.version,
+            actionId: action.actionId,
+            targetEventId: action.targetEventId,
+            message: action.message,
+            continue: action.shouldContinue,
+            stopReason: action.stopReason,
+            patch: action.patch == .empty ? nil : action.patch,
+            metadata: action.metadata.isEmpty ? nil : action.metadata
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case decision
+        case reason
+        case version
+        case actionId = "action_id"
+        case targetEventId = "target_event_id"
+        case message
+        case `continue`
+        case stopReason = "stop_reason"
+        case patch
+        case metadata
+    }
 }
 
 /// Callback for hook events
@@ -243,6 +301,7 @@ class HookSocketServer {
         serverSocket = socket(AF_UNIX, SOCK_STREAM, 0)
         guard serverSocket >= 0 else {
             logger.error("Failed to create socket: \(errno)")
+            AppDiagnosticsLogger.log(.error, category: .hooks, "Failed to create socket errno=\(errno)")
             return
         }
 
@@ -267,6 +326,7 @@ class HookSocketServer {
 
         guard bindResult == 0 else {
             logger.error("Failed to bind socket: \(errno)")
+            AppDiagnosticsLogger.log(.error, category: .hooks, "Failed to bind socket errno=\(errno)")
             close(serverSocket)
             serverSocket = -1
             return
@@ -276,12 +336,14 @@ class HookSocketServer {
 
         guard listen(serverSocket, 10) == 0 else {
             logger.error("Failed to listen: \(errno)")
+            AppDiagnosticsLogger.log(.error, category: .hooks, "Failed to listen errno=\(errno)")
             close(serverSocket)
             serverSocket = -1
             return
         }
 
         logger.info("Listening on \(Self.socketPath, privacy: .public)")
+        AppDiagnosticsLogger.log(.info, category: .hooks, "Listening on \(Self.socketPath)")
 
         acceptSource = DispatchSource.makeReadSource(fileDescriptor: serverSocket, queue: queue)
         acceptSource?.setEventHandler { [weak self] in
@@ -319,6 +381,32 @@ class HookSocketServer {
     func respondToPermissionBySession(sessionId: String, decision: String, reason: String? = nil) {
         queue.async { [weak self] in
             self?.sendPermissionResponseBySession(sessionId: sessionId, decision: decision, reason: reason)
+        }
+    }
+
+    /// Respond with the unified action model by toolUseId.
+    func respondToPermission(toolUseId: String, action: UnifiedAgentAction) {
+        queue.async { [weak self] in
+            self?.sendPermissionResponse(toolUseId: toolUseId, response: HookResponse(action: action))
+        }
+    }
+
+    /// Respond with the unified action model using toolUseId first and sessionId as fallback.
+    func respondToPermission(sessionId: String, toolUseId: String, action: UnifiedAgentAction) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let response = HookResponse(action: action)
+            if !self.sendPermissionResponse(toolUseId: toolUseId, response: response) {
+                AppDiagnosticsLogger.log(.debug, category: .hooks, "Falling back to session response session=\(sessionId) tool=\(toolUseId)")
+                self.sendPermissionResponseBySession(sessionId: sessionId, response: response)
+            }
+        }
+    }
+
+    /// Respond with the unified action model by sessionId.
+    func respondToPermissionBySession(sessionId: String, action: UnifiedAgentAction) {
+        queue.async { [weak self] in
+            self?.sendPermissionResponseBySession(sessionId: sessionId, response: HookResponse(action: action))
         }
     }
 
@@ -413,17 +501,21 @@ class HookSocketServer {
 
         let data = allData
         logger.debug("Event payload: \(String(data: data, encoding: .utf8) ?? "<invalid utf8>", privacy: .public)")
+        AppDiagnosticsLogger.log(.trace, category: .hooks, "Received raw payload bytes=\(data.count)")
 
         guard let rawEvent = try? JSONDecoder().decode(RawHookEvent.self, from: data) else {
             logger.warning("Failed to parse event: \(String(data: data, encoding: .utf8) ?? "?", privacy: .public)")
+            AppDiagnosticsLogger.log(.error, category: .hooks, "Failed to parse hook payload")
             close(clientSocket)
             return
         }
         let event = HookEvent(raw: rawEvent)
 
         logger.debug("Received: \(event.protocolDebugSummary, privacy: .public) for \(event.sessionId.prefix(8), privacy: .public)")
+        AppDiagnosticsLogger.log(.debug, category: .hooks, "Received \(event.protocolDebugSummary) session=\(event.sessionId)")
         if event.usesLegacyEventFallback {
             logger.notice("Legacy hook fallback used for \(event.sessionId.prefix(8), privacy: .public) official:\(event.event, privacy: .public)")
+            AppDiagnosticsLogger.log(.info, category: .hooks, "Legacy fallback session=\(event.sessionId) official=\(event.event)")
         }
 
         let permissionAdapter = AgentPermissionAdapterRegistry.shared.adapter(for: event.agentType)
@@ -432,7 +524,7 @@ class HookSocketServer {
             toolUseIdCache.store(for: event)
         }
 
-        if case .sessionEnd = event.domainEvent {
+        if event.isSessionEndLike {
             toolUseIdCache.removeAll(sessionId: event.sessionId)
         }
 
@@ -444,12 +536,14 @@ class HookSocketServer {
                 }
             ) else {
                 logger.warning("Permission request missing tool_use_id for \(event.sessionId.prefix(8), privacy: .public) - no cache hit")
+                AppDiagnosticsLogger.log(.error, category: .hooks, "Permission request missing tool_use_id session=\(event.sessionId)")
                 close(clientSocket)
                 eventHandler?(event)
                 return
             }
 
             logger.debug("Permission request - keeping socket open for \(event.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public)")
+            AppDiagnosticsLogger.log(.debug, category: .hooks, "Keeping permission socket open session=\(event.sessionId) tool=\(toolUseId)")
 
             let updatedEvent = HookEvent(
                 sessionId: event.sessionId,
@@ -492,22 +586,30 @@ class HookSocketServer {
     }
 
     private func sendPermissionResponse(toolUseId: String, decision: String, reason: String?) {
+        sendPermissionResponse(
+            toolUseId: toolUseId,
+            response: HookResponse(decision: decision, reason: reason)
+        )
+    }
+
+    @discardableResult
+    private func sendPermissionResponse(toolUseId: String, response: HookResponse) -> Bool {
         guard let pending = pendingPermissionStore.remove(toolUseId: toolUseId) else {
             logger.debug("No pending permission for toolUseId: \(toolUseId.prefix(12), privacy: .public)")
-            return
+            return false
         }
 
-        let response = HookResponse(decision: decision, reason: reason)
         guard let data = try? JSONEncoder().encode(response) else {
             close(pending.clientSocket)
-            return
+            return false
         }
         if let responseBody = String(data: data, encoding: .utf8) {
             logger.debug("Permission response body: \(responseBody, privacy: .public)")
         }
 
         let age = Date().timeIntervalSince(pending.receivedAt)
-        logger.info("Sending response: \(decision, privacy: .public) for \(pending.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public) (age: \(String(format: "%.1f", age), privacy: .public)s)")
+        logger.info("Sending response: \(response.decision, privacy: .public) for \(pending.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public) (age: \(String(format: "%.1f", age), privacy: .public)s)")
+        AppDiagnosticsLogger.log(.info, category: .hooks, "Sent permission response decision=\(response.decision) session=\(pending.sessionId) tool=\(toolUseId)")
 
         let writeSuccess = writeAllBytes(
             to: pending.clientSocket,
@@ -519,15 +621,22 @@ class HookSocketServer {
         if !writeSuccess {
             permissionFailureHandler?(pending.sessionId, toolUseId)
         }
+        return writeSuccess
     }
 
     private func sendPermissionResponseBySession(sessionId: String, decision: String, reason: String?) {
+        sendPermissionResponseBySession(
+            sessionId: sessionId,
+            response: HookResponse(decision: decision, reason: reason)
+        )
+    }
+
+    private func sendPermissionResponseBySession(sessionId: String, response: HookResponse) {
         guard let pending = pendingPermissionStore.removeMostRecent(sessionId: sessionId) else {
             logger.debug("No pending permission for session: \(sessionId.prefix(8), privacy: .public)")
             return
         }
 
-        let response = HookResponse(decision: decision, reason: reason)
         guard let data = try? JSONEncoder().encode(response) else {
             close(pending.clientSocket)
             permissionFailureHandler?(sessionId, pending.toolUseId)
@@ -538,7 +647,8 @@ class HookSocketServer {
         }
 
         let age = Date().timeIntervalSince(pending.receivedAt)
-        logger.info("Sending response: \(decision, privacy: .public) for \(sessionId.prefix(8), privacy: .public) tool:\(pending.toolUseId.prefix(12), privacy: .public) (age: \(String(format: "%.1f", age), privacy: .public)s)")
+        logger.info("Sending response: \(response.decision, privacy: .public) for \(sessionId.prefix(8), privacy: .public) tool:\(pending.toolUseId.prefix(12), privacy: .public) (age: \(String(format: "%.1f", age), privacy: .public)s)")
+        AppDiagnosticsLogger.log(.info, category: .hooks, "Sent permission response decision=\(response.decision) session=\(sessionId) tool=\(pending.toolUseId)")
 
         let writeSuccess = writeAllBytes(
             to: pending.clientSocket,
@@ -561,6 +671,7 @@ class HookSocketServer {
             let writeResult = data.withUnsafeBytes { bytes in
                 guard let baseAddress = bytes.baseAddress else {
                     logger.error("Failed to get data buffer address for \(failureContext)")
+                    AppDiagnosticsLogger.log(.error, category: .hooks, "Failed to get buffer address context=\(failureContext)")
                     return -1
                 }
                 let startAddress = baseAddress.advanced(by: offset)
@@ -569,11 +680,13 @@ class HookSocketServer {
 
             if writeResult < 0 {
                 logger.error("Write failed with errno: \(errno)")
+                AppDiagnosticsLogger.log(.error, category: .hooks, "Socket write failed errno=\(errno) context=\(failureContext)")
                 return false
             }
 
             if writeResult == 0 {
                 logger.warning("Write wrote 0 bytes while data remained for \(failureContext)")
+                AppDiagnosticsLogger.log(.error, category: .hooks, "Socket write wrote zero bytes context=\(failureContext)")
                 return false
             }
 
@@ -582,6 +695,7 @@ class HookSocketServer {
         }
 
         logger.debug("Write succeeded: \(data.count) bytes for \(failureContext)")
+        AppDiagnosticsLogger.log(.debug, category: .hooks, "Socket write succeeded bytes=\(data.count) context=\(failureContext)")
         return true
     }
 }

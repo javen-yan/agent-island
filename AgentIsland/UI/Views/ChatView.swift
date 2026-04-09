@@ -13,6 +13,7 @@ struct ChatView: View {
     let initialSession: SessionState
     let sessionMonitor: AgentSessionMonitor
     @ObservedObject var viewModel: NotchViewModel
+    private let chatFacade: AgentChatFacade
 
     @State private var inputText: String = ""
     @State private var history: [ChatHistoryItem] = []
@@ -28,11 +29,18 @@ struct ChatView: View {
     @State private var isTerminatingSession: Bool = false
     @FocusState private var isInputFocused: Bool
 
-    init(sessionId: String, initialSession: SessionState, sessionMonitor: AgentSessionMonitor, viewModel: NotchViewModel) {
+    init(
+        sessionId: String,
+        initialSession: SessionState,
+        sessionMonitor: AgentSessionMonitor,
+        viewModel: NotchViewModel,
+        chatFacade: AgentChatFacade? = nil
+    ) {
         self.sessionId = sessionId
         self.initialSession = initialSession
         self.sessionMonitor = sessionMonitor
         self._viewModel = ObservedObject(wrappedValue: viewModel)
+        self.chatFacade = chatFacade ?? .shared
         self._session = State(initialValue: initialSession)
         let initialHistory = ChatView.filteredHistoryItems(from: initialSession)
         let alreadyLoaded = !initialHistory.isEmpty
@@ -43,25 +51,32 @@ struct ChatView: View {
 
     /// Whether we're waiting for approval
     private var isWaitingForApproval: Bool {
-        session.phase.isWaitingForApproval
+        session.unifiedViewKind == .permissionRequested
     }
 
     /// Extract the tool name if waiting for approval
     private var approvalTool: String? {
-        session.phase.approvalToolName
+        session.unifiedPendingApprovalEvent?.payload.tool?.toolName ?? session.phase.approvalToolName
     }
 
     private var usesTerminalApprovalUI: Bool {
-        isWaitingForApproval && session.agentType.approvalCapability.supportedActions == [.terminal]
+        isWaitingForApproval && session.approvalCapability.kind == .terminalOnly
     }
 
     private var canInterruptTurn: Bool {
-        AgentInteractionRegistry.shared.canInterruptTurn(for: session)
+        chatFacade.canInterruptTurn(for: session)
             && (session.phase.isActive || session.phase.isWaitingForApproval)
     }
 
     private var canTerminateSession: Bool {
-        AgentInteractionRegistry.shared.canTerminateSession(for: session)
+        chatFacade.canTerminateSession(for: session)
+    }
+
+    private var showsCodexTerminalHint: Bool {
+        session.agentType.supportsPostTurnFollowUpInIsland
+            && approvalTool == nil
+            && session.phase == .waitingForInput
+            && canSendMessages
     }
 
     
@@ -103,8 +118,15 @@ struct ChatView: View {
                             ))
                     }
                 } else {
-                    inputBar
-                        .transition(.opacity)
+                    VStack(spacing: 0) {
+                        if showsCodexTerminalHint {
+                            codexTerminalHint
+                                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                        }
+
+                        inputBar
+                            .transition(.opacity)
+                    }
                 }
             }
         }
@@ -122,7 +144,7 @@ struct ChatView: View {
                 isLoading = false
             }
         }
-        .onReceive(SessionStore.shared.sessionsPublisher.receive(on: DispatchQueue.main)) { sessions in
+        .onReceive(chatFacade.sessionsPublisher.receive(on: DispatchQueue.main)) { sessions in
             if let updated = sessions.first(where: { $0.sessionId == sessionId }) {
                 let newHistory = Self.filteredHistoryItems(from: updated)
                 let countChanged = newHistory.count != history.count
@@ -287,7 +309,7 @@ struct ChatView: View {
             ProgressView()
                 .progressViewStyle(CircularProgressViewStyle(tint: .white.opacity(0.4)))
                 .scaleEffect(0.8)
-            Text("Loading messages...")
+            Text(L10n.text(.chatLoadingMessages))
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.white.opacity(0.4))
         }
@@ -301,7 +323,7 @@ struct ChatView: View {
             Image(agentIcon: "bubble.left.and.bubble.right")
                 .font(.system(size: 24))
                 .foregroundColor(.white.opacity(0.2))
-            Text("No messages yet")
+            Text(L10n.text(.chatNoMessagesYet))
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.white.opacity(0.4))
         }
@@ -408,14 +430,34 @@ struct ChatView: View {
     // MARK: - Input Bar
 
     private var canSendMessages: Bool {
-        AgentInteractionRegistry.shared.canSendMessages(for: session)
+        chatFacade.canSendMessages(for: session)
     }
 
     private var messagePlaceholder: String {
-        if canSendMessages {
-            return "Message \(session.agentType.displayName)..."
+        if session.agentType.supportsPostTurnFollowUpInIsland && canSendMessages {
+            return L10n.text(.chatContinueInTerminal)
         }
-        return "Open \(session.agentType.displayName) in \(AppSettings.terminalBackend.displayName) to enable messaging"
+        if canSendMessages {
+            return L10n.text(.chatMessagePlaceholder, session.agentType.displayName)
+        }
+        return L10n.text(.chatEnableMessagingPlaceholder, session.agentType.displayName)
+    }
+
+    private var codexTerminalHint: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(TerminalColors.amber)
+                .frame(width: 7, height: 7)
+
+            Text(L10n.text(.chatContinueInTerminal))
+                .font(.footnote.weight(.medium))
+                .foregroundColor(.white.opacity(0.72))
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.white.opacity(0.04))
     }
 
     private var inputBar: some View {
@@ -473,8 +515,9 @@ struct ChatView: View {
             tool: tool,
             toolInput: session.pendingToolInput,
             agentType: session.agentType,
-            supportedActions: session.agentType.approvalCapability.supportedActions,
+            supportedActions: session.approvalCapability.supportedActions,
             isInTerminalMultiplexer: session.isInTerminalMultiplexer,
+            permissionSourceDescription: session.permissionSourceDescription,
             onAction: { action in handleApprovalAction(action) }
         )
     }
@@ -484,8 +527,7 @@ struct ChatView: View {
             tool: tool,
             toolInput: session.pendingToolInput,
             agentName: session.agentType.displayName,
-            isInTerminalMultiplexer: session.isInTerminalMultiplexer,
-            onGoToTerminal: { focusTerminal() }
+            isInTerminalMultiplexer: session.isInTerminalMultiplexer
         )
     }
 
@@ -495,8 +537,7 @@ struct ChatView: View {
     private var interactivePromptBar: some View {
         ChatInteractivePromptBar(
             agentName: session.agentType.displayName,
-            isInTerminalMultiplexer: session.isInTerminalMultiplexer,
-            onGoToTerminal: { focusTerminal() }
+            isInTerminalMultiplexer: session.isInTerminalMultiplexer
         )
     }
 
@@ -517,20 +558,6 @@ struct ChatView: View {
 
     // MARK: - Actions
 
-    private func focusTerminal() {
-        let backend = AppSettings.terminalBackend
-        Task {
-            if let pid = session.pid {
-                _ = await YabaiController.shared.focusWindow(forAgentPid: pid, terminalBackend: backend)
-            } else {
-                _ = await YabaiController.shared.focusWindow(forWorkingDirectory: session.cwd, terminalBackend: backend)
-            }
-            await MainActor.run {
-                viewModel.notchClose()
-            }
-        }
-    }
-
     private func executeApprovalPolicy(_ policy: ApprovalPolicy) {
         sessionMonitor.executeApprovalPolicy(sessionId: sessionId, policy: policy)
         viewModel.notchClose()
@@ -546,8 +573,6 @@ struct ChatView: View {
             executeApprovalPolicy(.allowAlways)
         case .autoExecute:
             executeApprovalPolicy(.autoExecute)
-        case .terminal:
-            focusTerminal()
         }
     }
 
@@ -568,7 +593,7 @@ struct ChatView: View {
     }
 
     private func sendToSession(_ text: String) async {
-        let sent = await AgentInteractionRegistry.shared.sendMessage(text, for: session)
+        let sent = await chatFacade.sendMessage(text, for: session)
         if !sent {
             await MainActor.run {
                 inputText = text
@@ -581,7 +606,7 @@ struct ChatView: View {
 
         isInterruptingTurn = true
         Task {
-            _ = await AgentInteractionRegistry.shared.interruptTurn(for: session)
+            _ = await chatFacade.interruptTurn(for: session)
             await MainActor.run {
                 isInterruptingTurn = false
             }
@@ -593,7 +618,7 @@ struct ChatView: View {
 
         isTerminatingSession = true
         Task {
-            _ = await AgentInteractionRegistry.shared.terminateSession(for: session)
+            _ = await chatFacade.terminateSession(for: session)
             await MainActor.run {
                 isTerminatingSession = false
             }
@@ -679,7 +704,10 @@ struct AssistantMessageView: View {
 // MARK: - Processing Indicator
 
 struct ProcessingIndicatorView: View {
-    private let baseTexts = ["Processing", "Working"]
+    private let baseTexts = [
+        L10n.text(.chatProcessing),
+        L10n.text(.chatWorking)
+    ]
     private let color: Color
     private let baseText: String
 
@@ -717,7 +745,7 @@ struct ProcessingIndicatorView: View {
 
 struct TerminalApprovalIndicatorView: View {
     private let color = TerminalColors.amber
-    private let baseText = "Waiting for confirmation in Terminal"
+    private let baseText = L10n.text(.chatWaitingForConfirmationInTerminal)
 
     @State private var dotCount: Int = 1
     private let timer = Timer.publish(every: 0.4, on: .main, in: .common).autoconnect()
@@ -758,28 +786,32 @@ struct ToolCallView: View {
     @State private var isHovering: Bool = false
 
     private var statusColor: Color {
-        switch tool.status {
-        case .running:
+        switch tool.unifiedKind {
+        case .toolStarted:
             return Color.white
-        case .waitingForApproval:
+        case .permissionRequested:
             return Color.orange
-        case .success:
+        case .toolCompleted:
             return Color.green
-        case .error, .interrupted:
+        case .toolFailed:
             return Color.red
+        default:
+            return Color.white.opacity(0.6)
         }
     }
 
     private var textColor: Color {
-        switch tool.status {
-        case .running:
+        switch tool.unifiedKind {
+        case .toolStarted:
             return .white.opacity(0.6)
-        case .waitingForApproval:
+        case .permissionRequested:
             return Color.orange.opacity(0.9)
-        case .success:
+        case .toolCompleted:
             return .white.opacity(0.7)
-        case .error, .interrupted:
+        case .toolFailed:
             return Color.red.opacity(0.8)
+        default:
+            return .white.opacity(0.6)
         }
     }
 
@@ -808,11 +840,11 @@ struct ToolCallView: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(statusColor.opacity(tool.status == .running || tool.status == .waitingForApproval ? pulseOpacity : 0.6))
+                    .fill(statusColor.opacity(tool.unifiedKind == .toolStarted || tool.unifiedKind == .permissionRequested ? pulseOpacity : 0.6))
                     .frame(width: 6, height: 6)
                     .id(tool.status)  // Forces view recreation, cancelling repeatForever animation
                     .onAppear {
-                        if tool.status == .running || tool.status == .waitingForApproval {
+                        if tool.unifiedKind == .toolStarted || tool.unifiedKind == .permissionRequested {
                             startPulsing()
                         }
                     }
@@ -824,15 +856,15 @@ struct ToolCallView: View {
                     .fixedSize()
 
                 if tool.name == "Task" && !tool.subagentTools.isEmpty {
-                    let taskDesc = tool.input["description"] ?? "Running agent..."
-                    Text("\(taskDesc) (\(tool.subagentTools.count) tools)")
+                    let taskDesc = tool.input["description"] ?? L10n.text(.chatRunningAgent)
+                    Text(L10n.text(.chatTaskToolsSummary, taskDesc, tool.subagentTools.count))
                         .font(.system(size: 11))
                         .foregroundColor(textColor.opacity(0.7))
                         .lineLimit(1)
                         .truncationMode(.tail)
                 } else if tool.name == "AgentOutputTool", let desc = agentDescription {
                     let blocking = tool.input["block"] == "true"
-                    Text(blocking ? "Waiting: \(desc)" : desc)
+                    Text(blocking ? L10n.text(.chatWaitingPrefix, desc) : desc)
                         .font(.system(size: 11))
                         .foregroundColor(textColor.opacity(0.7))
                         .lineLimit(1)
@@ -844,7 +876,7 @@ struct ToolCallView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                 } else {
-                    Text(tool.statusDisplay.text)
+                    Text(tool.unifiedStatusText)
                         .font(.system(size: 11))
                         .foregroundColor(textColor.opacity(0.7))
                         .lineLimit(1)
@@ -854,7 +886,7 @@ struct ToolCallView: View {
                 Spacer()
 
                 // Expand indicator (only for expandable tools)
-                if canExpand && tool.status != .running && tool.status != .waitingForApproval {
+                if canExpand && tool.unifiedKind != .toolStarted && tool.unifiedKind != .permissionRequested {
                     Image(agentIcon: "chevron.right")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundColor(.white.opacity(0.3))
@@ -872,7 +904,7 @@ struct ToolCallView: View {
 
             // Result content (Edit always shows, others when expanded)
             // Edit tools bypass hasResult check - fallback in ToolResultContent renders from input params
-            if showContent && tool.status != .running && tool.name != "Task" && (hasResult || tool.name == "Edit") {
+            if showContent && tool.unifiedKind != .toolStarted && tool.name != "Task" && (hasResult || tool.name == "Edit") {
                 ToolResultContent(tool: tool)
                     .padding(.leading, 12)
                     .padding(.top, 4)
@@ -936,7 +968,7 @@ struct SubagentToolsList: View {
         VStack(alignment: .leading, spacing: 2) {
             // Show count of older hidden tools at top
             if hiddenCount > 0 {
-                Text("+\(hiddenCount) more tool uses")
+                Text(L10n.text(.chatMoreToolUses, hiddenCount))
                     .font(.system(size: 10))
                     .foregroundColor(.white.opacity(0.4))
             }
@@ -956,17 +988,13 @@ struct SubagentToolRow: View {
     @State private var dotOpacity: Double = 0.5
 
     private var statusColor: Color {
-        switch tool.status {
-        case .running, .waitingForApproval: return .orange
-        case .success: return .green
-        case .error, .interrupted: return .red
-        }
+        tool.unifiedStatusColor
     }
 
     /// Get status text using the same logic as regular tools
     private var statusText: String {
         if tool.status == .interrupted {
-            return "Interrupted"
+            return L10n.text(.chatInterrupted)
         } else if tool.status == .running {
             return ToolStatusDisplay.running(for: tool.name, input: tool.input).text
         } else {
@@ -980,11 +1008,11 @@ struct SubagentToolRow: View {
         HStack(spacing: 4) {
             // Status dot
             Circle()
-                .fill(statusColor.opacity(tool.status == .running ? dotOpacity : 0.6))
+                .fill(statusColor.opacity(tool.unifiedKind == .agentSubtaskStarted ? dotOpacity : 0.6))
                 .frame(width: 4, height: 4)
                 .id(tool.status)  // Forces view recreation, cancelling repeatForever animation
                 .onAppear {
-                    if tool.status == .running {
+                    if tool.unifiedKind == .agentSubtaskStarted {
                         withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
                             dotOpacity = 0.2
                         }
@@ -1020,7 +1048,7 @@ struct SubagentToolsSummary: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Subagent used \(tools.count) tools:")
+            Text(L10n.text(.chatSubagentUsedTools, tools.count))
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.white.opacity(0.5))
 
@@ -1099,7 +1127,7 @@ struct ThinkingView: View {
 struct InterruptedMessageView: View {
     var body: some View {
         HStack {
-            Text("Interrupted")
+            Text(L10n.text(.chatInterrupted))
                 .font(.system(size: 13))
                 .foregroundColor(.red)
             Spacer()
@@ -1113,19 +1141,17 @@ struct InterruptedMessageView: View {
 struct ChatInteractivePromptBar: View {
     let agentName: String
     let isInTerminalMultiplexer: Bool
-    let onGoToTerminal: () -> Void
 
     @State private var showContent = false
-    @State private var showButton = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     Image(agentIcon: "bubble.left.fill")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.cyan)
-                    Text("\(agentName) asks")
+                    Text(L10n.text(.asksSuffix, agentName))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.cyan)
                 }
@@ -1135,7 +1161,11 @@ struct ChatInteractivePromptBar: View {
                         .font(.system(size: 13, weight: .semibold, design: .monospaced))
                         .foregroundColor(TerminalColors.amber)
                         .fixedSize()
-                    Text(isInTerminalMultiplexer ? "\(agentName) needs your input in Terminal" : "Terminal jump unavailable for this session")
+                    Text(
+                        isInTerminalMultiplexer
+                            ? L10n.text(.chatNeedsInputInTerminal, agentName)
+                            : L10n.text(.chatTerminalUnavailable)
+                    )
                         .font(.system(size: 12))
                         .foregroundColor(.white.opacity(0.75))
                         .fixedSize(horizontal: false, vertical: true)
@@ -1143,27 +1173,6 @@ struct ChatInteractivePromptBar: View {
             }
             .opacity(showContent ? 1 : 0)
             .offset(x: showContent ? 0 : -10)
-
-            Button {
-                if isInTerminalMultiplexer {
-                    onGoToTerminal()
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(agentIcon: "terminal")
-                        .font(.system(size: 11, weight: .medium))
-                    Text(isInTerminalMultiplexer ? "Jump to Terminal" : "Terminal unavailable")
-                        .font(.system(size: 13, weight: .medium))
-                }
-                .foregroundColor(isInTerminalMultiplexer ? .black : .white.opacity(0.4))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(isInTerminalMultiplexer ? Color.white.opacity(0.95) : Color.white.opacity(0.1))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .opacity(showButton ? 1 : 0)
-            .scaleEffect(showButton ? 1 : 0.8)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
@@ -1180,9 +1189,6 @@ struct ChatInteractivePromptBar: View {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.05)) {
                 showContent = true
             }
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.7).delay(0.1)) {
-                showButton = true
-            }
         }
     }
 }
@@ -1196,10 +1202,33 @@ struct ChatApprovalBar: View {
     let agentType: AgentPlatform
     let supportedActions: [ApprovalAction]
     let isInTerminalMultiplexer: Bool
+    let permissionSourceDescription: String
     let onAction: (ApprovalAction) -> Void
 
     @State private var showContent = false
     @State private var showButtons = false
+
+    private var providerCapabilities: ProviderCapabilities {
+        ProviderCapabilities.baseline(for: agentType)
+    }
+
+    private var approvalTitle: String {
+        providerCapabilities.permissions.providerManagedPermissionsVisible
+            ? L10n.text(.chatConfirmCommand)
+            : L10n.text(.chatPermissionRequest)
+    }
+
+    private var approvalFallbackText: String {
+        providerCapabilities.permissions.providerManagedPermissionsVisible
+            ? L10n.text(.chatReviewCommandBeforeContinuing)
+            : L10n.text(.chatActionNeedsApprovalBeforeContinuing)
+    }
+
+    private var approvalFooterText: String? {
+        providerCapabilities.permissions.providerManagedPermissionsVisible
+            ? L10n.text(.chatProviderContinueFooter, permissionSourceDescription)
+            : permissionSourceDescription
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1208,7 +1237,7 @@ struct ChatApprovalBar: View {
                     Circle()
                         .fill(TerminalColors.amber)
                         .frame(width: 7, height: 7)
-                    Text(agentType == .codex ? "Confirm Command" : "Permission Request")
+                    Text(approvalTitle)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.white.opacity(0.55))
                 }
@@ -1225,15 +1254,15 @@ struct ChatApprovalBar: View {
                             .foregroundColor(.white.opacity(0.78))
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
-                        Text(agentType == .codex ? "Review this command before Codex continues." : "This action needs your approval before continuing.")
+                        Text(approvalFallbackText)
                             .font(.system(size: 12))
                             .foregroundColor(.white.opacity(0.65))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
-                if agentType == .codex {
-                    Text("Continue will let Codex run this command immediately.")
+                if let approvalFooterText {
+                    Text(approvalFooterText)
                         .font(.system(size: 11))
                         .foregroundColor(.white.opacity(0.42))
                         .fixedSize(horizontal: false, vertical: true)
@@ -1244,7 +1273,7 @@ struct ChatApprovalBar: View {
 
             HStack(spacing: 8) {
                 ForEach(supportedActions, id: \.self) { action in
-                    let isEnabled = action != .terminal || isInTerminalMultiplexer
+                    let isEnabled = true
                     Button {
                         if isEnabled {
                             onAction(action)
@@ -1288,22 +1317,14 @@ struct ChatApprovalBar: View {
 
     @ViewBuilder
     private func buttonLabel(for action: ApprovalAction, isEnabled: Bool) -> some View {
-        if action == .terminal {
-            HStack(spacing: 4) {
-                Image(agentIcon: "terminal")
-                    .font(.system(size: 11, weight: .medium))
-                Text(isEnabled ? action.label : "Terminal unavailable")
-            }
-        } else {
-            Text(agentType == .codex && action == .allowOnce ? "Continue" : action.label)
-        }
+        Text(action.displayLabel(provider: agentType))
     }
 
     private func foregroundColor(for action: ApprovalAction, isEnabled: Bool) -> Color {
         guard isEnabled else { return .white.opacity(0.35) }
         switch action {
         case .deny: return .white.opacity(0.75)
-        case .allowOnce, .allowAlways, .autoExecute, .terminal: return .black
+        case .allowOnce, .allowAlways, .autoExecute: return .black
         }
     }
 
@@ -1312,7 +1333,7 @@ struct ChatApprovalBar: View {
         switch action {
         case .deny:
             return Color.white.opacity(0.12)
-        case .allowOnce, .terminal:
+        case .allowOnce:
             return Color.white.opacity(0.95)
         case .allowAlways:
             return Color(red: 0.95, green: 0.60, blue: 0.18)
@@ -1327,19 +1348,17 @@ struct ChatTerminalApprovalBar: View {
     let toolInput: String?
     let agentName: String
     let isInTerminalMultiplexer: Bool
-    let onGoToTerminal: () -> Void
 
     @State private var showContent = false
-    @State private var showButton = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     Circle()
                         .fill(TerminalColors.amber)
                         .frame(width: 7, height: 7)
-                    Text("Confirm in Terminal")
+                    Text(L10n.text(.chatConfirmInTerminal))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.white.opacity(0.55))
                 }
@@ -1349,7 +1368,13 @@ struct ChatTerminalApprovalBar: View {
                         .font(.system(size: 13, weight: .semibold, design: .monospaced))
                         .foregroundColor(TerminalColors.amber)
                         .fixedSize()
-                    Text(toolInput ?? (isInTerminalMultiplexer ? "\(agentName) needs approval in Terminal" : "Terminal jump unavailable for this session"))
+                    Text(
+                        toolInput ?? (
+                            isInTerminalMultiplexer
+                                ? L10n.text(.chatNeedsApprovalInTerminal, agentName)
+                                : L10n.text(.chatTerminalUnavailable)
+                        )
+                    )
                         .font(.system(size: 12))
                         .foregroundColor(.white.opacity(0.75))
                         .fixedSize(horizontal: false, vertical: true)
@@ -1357,25 +1382,6 @@ struct ChatTerminalApprovalBar: View {
             }
             .opacity(showContent ? 1 : 0)
             .offset(x: showContent ? 0 : -10)
-
-            Button {
-                focusIfPossible()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(agentIcon: "terminal")
-                        .font(.system(size: 11, weight: .medium))
-                    Text(isInTerminalMultiplexer ? "Jump to Terminal" : "Terminal unavailable")
-                        .font(.system(size: 13, weight: .medium))
-                }
-                .foregroundColor(isInTerminalMultiplexer ? .black : .white.opacity(0.4))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(isInTerminalMultiplexer ? Color.white.opacity(0.95) : Color.white.opacity(0.1))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .opacity(showButton ? 1 : 0)
-            .scaleEffect(showButton ? 1 : 0.8)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
@@ -1392,15 +1398,6 @@ struct ChatTerminalApprovalBar: View {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.05)) {
                 showContent = true
             }
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.7).delay(0.1)) {
-                showButton = true
-            }
-        }
-    }
-
-    private func focusIfPossible() {
-        if isInTerminalMultiplexer {
-            onGoToTerminal()
         }
     }
 }
@@ -1420,7 +1417,10 @@ struct NewMessagesIndicator: View {
                 Image(agentIcon: "chevron.down")
                     .font(.system(size: 10, weight: .bold))
 
-                Text(count == 1 ? "1 new message" : "\(count) new messages")
+                Text(count == 1
+                    ? L10n.text(.chatNewMessageSingular)
+                    : L10n.text(.chatNewMessagePlural, count)
+                )
                     .font(.system(size: 12, weight: .medium))
             }
             .foregroundColor(.white)

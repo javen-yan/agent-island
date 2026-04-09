@@ -12,6 +12,9 @@ import SwiftUI
 enum AgentIconRegistry {
     private static let fallbackIconNames: [String: String] = [
         "brain.head.profile": "agenticon-brain",
+        "provider.claude": "provider-claude",
+        "provider.codex": "provider-codex",
+        "provider.gemini": "provider-gemini",
         "terminal": "agenticon-terminal",
         "sparkles": "agenticon-sparkles",
         "xmark": "agenticon-close",

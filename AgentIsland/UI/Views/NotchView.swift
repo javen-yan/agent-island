@@ -17,9 +17,10 @@ private let cornerRadiusInsets = (
 
 struct NotchView: View {
     @ObservedObject var viewModel: NotchViewModel
+    @Environment(\.openSettings) private var openSettings
     @StateObject private var sessionMonitor = AgentSessionMonitor()
     @StateObject private var activityCoordinator = NotchActivityCoordinator.shared
-    @ObservedObject private var updateManager = UpdateManager.shared
+    @StateObject private var chromeFacade = NotchChromeFacade.shared
     @State private var previousPendingIds: Set<String> = []
     @State private var previousInteractiveAttentionIds: Set<String> = []
     @State private var previousWaitingForInputIds: Set<String> = []
@@ -32,12 +33,14 @@ struct NotchView: View {
 
     /// Whether any agent session is currently processing or compacting
     private var isAnyProcessing: Bool {
-        sessionMonitor.instances.contains { $0.phase == .processing || $0.phase == .compacting }
+        sessionMonitor.instances.contains {
+            $0.unifiedViewKind == .toolStarted || $0.unifiedViewKind == .sessionCompactionRequested
+        }
     }
 
     /// Whether any agent session has a pending permission request
     private var hasPendingPermission: Bool {
-        sessionMonitor.instances.contains { $0.phase.isWaitingForApproval }
+        sessionMonitor.instances.contains { $0.unifiedViewKind == .permissionRequested }
     }
 
     /// Whether any agent session is waiting for user input (done/ready state) within the display window
@@ -46,7 +49,7 @@ struct NotchView: View {
         let displayDuration: TimeInterval = 30  // Show checkmark for 30 seconds
 
         return sessionMonitor.instances.contains { session in
-            guard session.phase == .waitingForInput else { return false }
+            guard session.unifiedViewKind == .agentIdle, session.phase == .waitingForInput else { return false }
             // Only show if within the 30-second display window
             if let enteredAt = waitingForInputTimestamps[session.stableId] {
                 return now.timeIntervalSince(enteredAt) < displayDuration
@@ -215,13 +218,13 @@ struct NotchView: View {
     }
 
     private var activeAgentType: AgentPlatform? {
-        if let session = latestSession(where: { $0.phase.isWaitingForApproval }) {
+        if let session = latestSession(where: { $0.unifiedViewKind == .permissionRequested }) {
             return session.agentType
         }
-        if let session = latestSession(where: { $0.phase == .processing || $0.phase == .compacting }) {
+        if let session = latestSession(where: { $0.unifiedViewKind == .toolStarted || $0.unifiedViewKind == .sessionCompactionRequested }) {
             return session.agentType
         }
-        if let session = latestSession(where: { $0.phase == .waitingForInput }) {
+        if let session = latestSession(where: { $0.unifiedViewKind == .agentIdle && $0.phase == .waitingForInput }) {
             return session.agentType
         }
         return nil
@@ -332,24 +335,21 @@ struct NotchView: View {
 
             Spacer()
 
-            // Menu toggle
             Button {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    viewModel.toggleMenu()
-                    if viewModel.contentType == .menu {
-                        updateManager.markUpdateSeen()
-                    }
+                NSApp.activate(ignoringOtherApps: true)
+                viewModel.notchClose()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                    openSettings()
                 }
             } label: {
                 ZStack(alignment: .topTrailing) {
-                    Image(agentIcon: viewModel.contentType == .menu ? "xmark" : "line.3.horizontal")
+                    Image(agentIcon: "gearshape")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.white.opacity(0.4))
                         .frame(width: 22, height: 22)
                         .contentShape(Rectangle())
 
-                    // Green dot for unseen update
-                    if updateManager.hasUnseenUpdate && viewModel.contentType != .menu {
+                    if chromeFacade.hasUnseenUpdate {
                         Circle()
                             .fill(TerminalColors.green)
                             .frame(width: 6, height: 6)
@@ -372,8 +372,6 @@ struct NotchView: View {
                     sessionMonitor: sessionMonitor,
                     viewModel: viewModel
                 )
-            case .menu:
-                NotchMenuView(viewModel: viewModel)
             case .chat(let session):
                 ChatView(
                     sessionId: session.sessionId,
@@ -434,7 +432,7 @@ struct NotchView: View {
     }
 
     private func handlePendingSessionsChange(_ sessions: [SessionListState]) {
-        let interactiveSessions = sessions.filter { $0.phase.isWaitingForApproval }
+        let interactiveSessions = sessions.filter { $0.unifiedViewKind == .permissionRequested }
         let currentInteractiveIds = Set(interactiveSessions.map { $0.stableId })
         let newInteractiveIds = currentInteractiveIds.subtracting(previousInteractiveAttentionIds)
 
@@ -474,7 +472,9 @@ struct NotchView: View {
 
     private func handleWaitingForInputChange(_ instances: [SessionListState]) {
         // Get sessions that are now waiting for input
-        let waitingForInputSessions = instances.filter { $0.phase == .waitingForInput }
+        let waitingForInputSessions = instances.filter {
+            $0.unifiedViewKind == .agentIdle && $0.phase == .waitingForInput
+        }
         let currentIds = Set(waitingForInputSessions.map { $0.stableId })
         let newWaitingIds = currentIds.subtracting(previousWaitingForInputIds)
 
@@ -495,6 +495,21 @@ struct NotchView: View {
             // Get the sessions that just entered waitingForInput
             let newlyWaitingSessions = waitingForInputSessions.filter { newWaitingIds.contains($0.stableId) }
             triggerAttentionFeedback(for: newlyWaitingSessions)
+
+            if let target = newlyWaitingSessions
+                .filter({ $0.agentType.autoRevealOnTurnCompletion })
+                .sorted(by: { $0.lastActivity > $1.lastActivity })
+                .first {
+                Task {
+                    guard let detail = await sessionMonitor.sessionDetail(sessionId: target.sessionId) else { return }
+                    await MainActor.run {
+                        if viewModel.status != .opened {
+                            viewModel.notchOpen(reason: .notification)
+                        }
+                        viewModel.showChat(for: detail)
+                    }
+                }
+            }
 
             // Schedule hiding the checkmark after 30 seconds
             DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [self] in

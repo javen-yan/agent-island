@@ -25,13 +25,11 @@ enum NotchOpenReason {
 
 enum NotchContentType: Equatable {
     case instances
-    case menu
     case chat(SessionState)
 
     var id: String {
         switch self {
         case .instances: return "instances"
-        case .menu: return "menu"
         case .chat(let session): return "chat-\(session.sessionId)"
         }
     }
@@ -46,12 +44,6 @@ class NotchViewModel: ObservableObject {
     @Published var contentType: NotchContentType = .instances
     @Published var isHovering: Bool = false
     @Published private(set) var instancesContentHeight: CGFloat = 120
-    @Published private(set) var menuContentHeight: CGFloat = 240
-
-    // MARK: - Dependencies
-
-    private let screenSelector = ScreenSelector.shared
-    private let soundSelector = SoundSelector.shared
 
     // MARK: - Geometry
 
@@ -71,14 +63,6 @@ class NotchViewModel: ObservableObject {
             return CGSize(
                 width: min(screenRect.width * 0.5, 600),
                 height: 580
-            )
-        case .menu:
-            return CGSize(
-                width: min(screenRect.width * 0.4, 480),
-                height: min(
-                    screenRect.height * 0.82,
-                    max(180, menuContentHeight + 32)
-                )
             )
         case .instances:
             return CGSize(
@@ -113,17 +97,6 @@ class NotchViewModel: ObservableObject {
         )
         self.hasPhysicalNotch = hasPhysicalNotch
         setupEventHandlers()
-        observeSelectors()
-    }
-
-    private func observeSelectors() {
-        screenSelector.$isPickerExpanded
-            .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &cancellables)
-
-        soundSelector.$isPickerExpanded
-            .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &cancellables)
     }
 
     // MARK: - Event Handling
@@ -188,11 +161,6 @@ class NotchViewModel: ObservableObject {
                 notchClose()
                 // Re-post the click so it reaches the window/app behind us
                 repostClickAt(location)
-            } else if geometry.notchScreenRect.contains(location) {
-                // Clicking notch while opened - only close if NOT in chat mode
-                if !isInChatMode {
-                    notchClose()
-                }
             }
         case .closed, .popping:
             if geometry.isPointInNotch(location) {
@@ -273,10 +241,6 @@ class NotchViewModel: ObservableObject {
         status = .closed
     }
 
-    func toggleMenu() {
-        contentType = contentType == .menu ? .instances : .menu
-    }
-
     func showChat(for session: SessionState) {
         // Avoid unnecessary updates if already showing this chat
         if case .chat(let current) = contentType, current.sessionId == session.sessionId {
@@ -289,12 +253,6 @@ class NotchViewModel: ObservableObject {
         let clamped = max(72, ceil(height))
         guard abs(clamped - instancesContentHeight) > 1 else { return }
         instancesContentHeight = clamped
-    }
-
-    func updateMenuContentHeight(_ height: CGFloat) {
-        let clamped = max(160, ceil(height))
-        guard abs(clamped - menuContentHeight) > 1 else { return }
-        menuContentHeight = clamped
     }
 
     /// Go back to instances list and clear saved chat state

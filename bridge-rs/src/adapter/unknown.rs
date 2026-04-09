@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+use crate::protocol::PermissionDecision;
+
 use super::{
     default_process_info, default_status_for_event, normalize_input_with_options,
     BridgeCapabilities, NormalizedInput, NormalizedInputOptions, PermissionCapability, ProcessInfo,
@@ -36,12 +38,7 @@ impl SourceAdapter for UnknownAdapter {
         default_process_info(input)
     }
 
-    fn permission_response(
-        &self,
-        _decision: Option<&str>,
-        _reason: Option<&str>,
-        _hook_event: &str,
-    ) -> Option<Value> {
+    fn permission_response(&self, _response: &PermissionDecision, _hook_event: &str) -> Option<Value> {
         None
     }
 }

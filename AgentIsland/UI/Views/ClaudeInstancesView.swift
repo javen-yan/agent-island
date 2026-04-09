@@ -51,11 +51,11 @@ struct AgentInstancesView: View {
 
     private var emptyState: some View {
         VStack(spacing: 8) {
-            Text("No sessions")
+            Text(L10n.text(.instancesNoSessions))
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.white.opacity(0.4))
 
-            Text("Run Claude, Codex, or Gemini in terminal")
+            Text(L10n.text(.instancesRunAgentsInTerminal))
                 .font(.system(size: 11))
                 .foregroundColor(.white.opacity(0.25))
         }
@@ -85,10 +85,36 @@ struct AgentInstancesView: View {
     /// Lower number = higher priority
     /// Approval requests share priority with processing to maintain stable ordering
     private func phasePriority(_ phase: SessionPhase) -> Int {
-        switch phase {
-        case .waitingForApproval, .processing, .compacting: return 0
-        case .waitingForInput: return 1
-        case .idle, .ended: return 2
+        switch SessionListState(
+            sessionId: "",
+            agentType: .claude,
+            cwd: "",
+            transcriptPath: nil,
+            projectName: "",
+            pid: nil,
+            tty: nil,
+            isInTerminalMultiplexer: false,
+            detectedTerminalBackend: nil,
+            phase: phase,
+            conversationInfo: ConversationInfo(
+                summary: nil,
+                lastMessage: nil,
+                lastMessageRole: nil,
+                lastToolName: nil,
+                firstUserMessage: nil,
+                lastUserMessageDate: nil
+            ),
+            lastActivity: .distantPast,
+            createdAt: .distantPast
+        ).unifiedViewKind {
+        case .permissionRequested, .toolStarted, .sessionCompactionRequested:
+            return 0
+        case .agentIdle:
+            return phase == .waitingForInput ? 1 : 2
+        case .sessionEnded:
+            return 2
+        default:
+            return 2
         }
     }
 
@@ -98,7 +124,6 @@ struct AgentInstancesView: View {
                 ForEach(sortedInstances) { session in
                     InstanceRow(
                         session: session,
-                        onFocus: { focusSession(session) },
                         onChat: { openChat(session) },
                         onArchive: { archiveSession(session) },
                         onPolicy: { policy in executeApprovalPolicy(session, policy: policy) }
@@ -118,22 +143,6 @@ struct AgentInstancesView: View {
     }
 
     // MARK: - Actions
-
-    private func focusSession(_ session: SessionListState) {
-        guard session.isInTerminalMultiplexer else { return }
-
-        let backend = AppSettings.terminalBackend
-        Task {
-            if let pid = session.pid {
-                _ = await YabaiController.shared.focusWindow(forAgentPid: pid, terminalBackend: backend)
-            } else {
-                _ = await YabaiController.shared.focusWindow(forWorkingDirectory: session.cwd, terminalBackend: backend)
-            }
-            await MainActor.run {
-                viewModel.notchClose()
-            }
-        }
-    }
 
     private func openChat(_ session: SessionListState) {
         Task {
@@ -158,14 +167,12 @@ struct AgentInstancesView: View {
 
 struct InstanceRow: View {
     let session: SessionListState
-    let onFocus: () -> Void
     let onChat: () -> Void
     let onArchive: () -> Void
     let onPolicy: (ApprovalPolicy) -> Void
 
     @State private var isHovered = false
     @State private var spinnerPhase = 0
-    @State private var isYabaiAvailable = false
 
     private let spinnerSymbols = ["·", "✢", "✳", "∗", "✻", "✽"]
     private let spinnerTimer = Timer.publish(every: 0.15, on: .main, in: .common).autoconnect()
@@ -177,7 +184,11 @@ struct InstanceRow: View {
 
     /// Codex approvals must be completed in the terminal
     private var usesTerminalApprovalUI: Bool {
-        isWaitingForApproval && session.agentType.approvalCapability.supportedActions == [.terminal]
+        isWaitingForApproval && session.approvalCapability.kind == .terminalOnly
+    }
+
+    private var supportsPostTurnFollowUpInIsland: Bool {
+        session.agentType.supportsPostTurnFollowUpInIsland
     }
 
     /// Whether the pending tool requires interactive input (not just approve/deny)
@@ -204,12 +215,30 @@ struct InstanceRow: View {
                         AgentBadge(agentType: session.agentType)
                     }
 
-                    if showsJumpState {
-                        Text("Done - click to jump")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(TerminalColors.green)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                    if showsCompletionState {
+                        if session.agentType.showsLastReplyInCompletionSummary,
+                           let lastMsg = session.lastMessage,
+                           !lastMsg.isEmpty {
+                            Text(lastMsg)
+                                .font(.system(size: 10))
+                                .foregroundColor(.white.opacity(0.4))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+
+                        if supportsPostTurnFollowUpInIsland {
+                            Text(L10n.text(.instancesContinueInTerminal))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(TerminalColors.green)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        } else {
+                            Text(L10n.text(.instancesReadyToContinue))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(TerminalColors.green)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
                     } else if !showsTransientContentCard, let toolName = session.pendingToolName {
                         compactSubtitleForPendingTool(toolName: toolName)
                     } else if let role = session.lastMessageRole {
@@ -231,7 +260,7 @@ struct InstanceRow: View {
                             }
                         case "user":
                             HStack(spacing: 4) {
-                                Text("You:")
+                                Text(L10n.text(.instancesYou))
                                     .font(.system(size: 10, weight: .medium))
                                     .foregroundColor(.white.opacity(0.5))
                                 if let msg = session.lastMessage {
@@ -289,9 +318,6 @@ struct InstanceRow: View {
                 .fill(isHovered ? Color.white.opacity(0.06) : Color.clear)
         )
         .onHover { isHovered = $0 }
-        .task {
-            isYabaiAvailable = await WindowFinder.shared.isYabaiAvailable()
-        }
     }
 
     @ViewBuilder
@@ -299,12 +325,6 @@ struct InstanceRow: View {
         HStack(spacing: 8) {
             IconButton(icon: "bubble.left") {
                 onChat()
-            }
-
-            if session.isInTerminalMultiplexer && isYabaiAvailable {
-                IconButton(icon: "arrow.up.right") {
-                    onFocus()
-                }
             }
 
             if session.phase == .idle || session.phase == .waitingForInput {
@@ -319,8 +339,11 @@ struct InstanceRow: View {
         isWaitingForApproval
     }
 
-    private var showsJumpState: Bool {
-        session.phase == .waitingForInput && session.isInTerminalMultiplexer && !isWaitingForApproval
+    private var showsCompletionState: Bool {
+        session.unifiedViewKind == .agentIdle
+            && session.phase == .waitingForInput
+            && session.isInTerminalMultiplexer
+            && !isWaitingForApproval
     }
 
     @ViewBuilder
@@ -330,12 +353,12 @@ struct InstanceRow: View {
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundColor(TerminalColors.amber.opacity(0.9))
             if isInteractiveTool {
-                Text("Needs your input")
+                Text(L10n.text(.instancesNeedsYourInput))
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.5))
                     .fixedSize(horizontal: false, vertical: true)
             } else if usesTerminalApprovalUI {
-                Text(session.pendingToolInput ?? "Jump to Terminal to continue")
+                Text(session.pendingToolInput ?? L10n.text(.chatWaitingForConfirmationInTerminal))
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.5))
                     .lineLimit(1)
@@ -354,16 +377,14 @@ struct InstanceRow: View {
             if isInteractiveTool {
                 ListAskBar(
                     agentName: session.agentType.displayName,
-                    isEnabled: session.isInTerminalMultiplexer,
-                    onTap: onFocus
+                    isEnabled: session.isInTerminalMultiplexer
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             } else {
                 ListTerminalApprovalBar(
                     tool: session.pendingToolName ?? "exec_command",
                     toolInput: session.pendingToolInput,
-                    isEnabled: session.isInTerminalMultiplexer,
-                    onTap: onFocus
+                    isEnabled: session.isInTerminalMultiplexer
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
@@ -372,8 +393,9 @@ struct InstanceRow: View {
                 tool: session.pendingToolName ?? "tool",
                 toolInput: session.pendingToolInput,
                 agentType: session.agentType,
-                supportedActions: session.agentType.approvalCapability.supportedActions,
+                supportedActions: session.approvalCapability.supportedActions,
                 isTerminalEnabled: session.isInTerminalMultiplexer,
+                permissionSourceDescription: session.permissionSourceDescription,
                 onAction: handleApprovalAction
             )
             .transition(.opacity.combined(with: .scale(scale: 0.9)))
@@ -390,8 +412,6 @@ struct InstanceRow: View {
             onPolicy(.allowAlways)
         case .autoExecute:
             onPolicy(.autoExecute)
-        case .terminal:
-            onFocus()
         }
     }
 
@@ -406,26 +426,26 @@ struct InstanceRow: View {
 
     @ViewBuilder
     private var stateIndicator: some View {
-        switch session.phase {
-        case .processing, .compacting:
+        switch session.unifiedStatusColor {
+        case "processing":
             Text(spinnerSymbols[spinnerPhase % spinnerSymbols.count])
                 .font(.system(size: 12, weight: .bold))
                 .foregroundColor(session.agentType.accentColor)
                 .onReceive(spinnerTimer) { _ in
                     spinnerPhase = (spinnerPhase + 1) % spinnerSymbols.count
                 }
-        case .waitingForApproval:
+        case "approval":
             Text(spinnerSymbols[spinnerPhase % spinnerSymbols.count])
                 .font(.system(size: 12, weight: .bold))
                 .foregroundColor(TerminalColors.amber)
                 .onReceive(spinnerTimer) { _ in
                     spinnerPhase = (spinnerPhase + 1) % spinnerSymbols.count
                 }
-        case .waitingForInput:
+        case "ready":
             Circle()
                 .fill(TerminalColors.green)
                 .frame(width: 6, height: 6)
-        case .idle, .ended:
+        default:
             Circle()
                 .fill(Color.white.opacity(0.2))
                 .frame(width: 6, height: 6)
@@ -440,7 +460,11 @@ struct AgentBadge: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(agentIcon: agentType.iconSymbol)
-                .font(.system(size: 8, weight: .semibold))
+                .resizable()
+                .renderingMode(.original)
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 11, height: 11)
             Text(agentType.displayName)
                 .font(.system(size: 9, weight: .semibold))
         }
@@ -460,7 +484,24 @@ struct ListApprovalBar: View {
     let agentType: AgentPlatform
     let supportedActions: [ApprovalAction]
     let isTerminalEnabled: Bool
+    let permissionSourceDescription: String
     let onAction: (ApprovalAction) -> Void
+
+    private var providerCapabilities: ProviderCapabilities {
+        ProviderCapabilities.baseline(for: agentType)
+    }
+
+    private var approvalTitle: String {
+        providerCapabilities.permissions.providerManagedPermissionsVisible
+            ? L10n.text(.chatConfirmCommand)
+            : L10n.text(.chatPermissionRequest)
+    }
+
+    private var approvalFooterText: String? {
+        providerCapabilities.permissions.providerManagedPermissionsVisible
+            ? L10n.text(.chatProviderContinueFooter, permissionSourceDescription)
+            : permissionSourceDescription
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -468,7 +509,7 @@ struct ListApprovalBar: View {
                 Circle()
                     .fill(TerminalColors.amber)
                     .frame(width: 7, height: 7)
-                Text(agentType == .codex ? "Confirm Command" : "Permission Request")
+                Text(approvalTitle)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.white.opacity(0.55))
             }
@@ -486,8 +527,8 @@ struct ListApprovalBar: View {
                 }
             }
 
-            if agentType == .codex {
-                Text("Continue will let Codex run this command immediately.")
+            if let approvalFooterText {
+                Text(approvalFooterText)
                     .font(.system(size: 10))
                     .foregroundColor(.white.opacity(0.38))
                     .fixedSize(horizontal: false, vertical: true)
@@ -495,7 +536,7 @@ struct ListApprovalBar: View {
 
             HStack(spacing: 8) {
                 ForEach(supportedActions, id: \.self) { action in
-                    let isEnabled = action != .terminal || isTerminalEnabled
+                    let isEnabled = true
                     Button {
                         if isEnabled {
                             onAction(action)
@@ -521,32 +562,18 @@ struct ListApprovalBar: View {
 
     @ViewBuilder
     private func label(for action: ApprovalAction) -> some View {
-        if action == .terminal {
-            HStack(spacing: 4) {
-                Image(agentIcon: "terminal")
-                    .font(.system(size: 10, weight: .medium))
-                Text(isTerminalEnabled ? "Jump" : "Unavailable")
-            }
-        } else {
-            Text(compactLabel(for: action))
-        }
+        Text(compactLabel(for: action))
     }
 
     private func compactLabel(for action: ApprovalAction) -> String {
-        switch action {
-        case .deny: return "Deny"
-        case .allowOnce: return agentType == .codex ? "Continue" : "Once"
-        case .allowAlways: return "Always"
-        case .autoExecute: return "Auto"
-        case .terminal: return "Jump"
-        }
+        action.displayLabel(provider: agentType, compact: true)
     }
 
     private func foregroundColor(for action: ApprovalAction, isEnabled: Bool) -> Color {
         guard isEnabled else { return .white.opacity(0.35) }
         switch action {
         case .deny: return .white.opacity(0.8)
-        case .allowOnce, .allowAlways, .autoExecute, .terminal: return .black
+        case .allowOnce, .allowAlways, .autoExecute: return .black
         }
     }
 
@@ -555,7 +582,7 @@ struct ListApprovalBar: View {
         switch action {
         case .deny:
             return Color.white.opacity(0.12)
-        case .allowOnce, .terminal:
+        case .allowOnce:
             return Color.white.opacity(0.92)
         case .allowAlways:
             return Color(red: 0.95, green: 0.62, blue: 0.18)
@@ -569,34 +596,29 @@ struct ListTerminalApprovalBar: View {
     let tool: String
     let toolInput: String?
     let isEnabled: Bool
-    let onTap: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(TerminalColors.amber)
-                        .frame(width: 7, height: 7)
-                    Text("Jump to Terminal")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.55))
-                }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(TerminalColors.amber)
+                    .frame(width: 7, height: 7)
+                Text(L10n.text(.chatWaitingForConfirmationInTerminal))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(0.55))
+            }
 
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
                     Text(MCPToolFormatter.formatToolName(tool))
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
                         .foregroundColor(TerminalColors.amber)
-                    Text(toolInput ?? (isEnabled ? "Jump to Terminal to continue" : "Terminal jump unavailable"))
+                    Text(toolInput ?? (isEnabled ? L10n.text(.chatWaitingForConfirmationInTerminal) : L10n.text(.chatTerminalUnavailable)))
                         .font(.system(size: 11))
                         .foregroundColor(.white.opacity(0.75))
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-
-            Spacer(minLength: 0)
-
-            TerminalButton(isEnabled: isEnabled, onTap: onTap)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -607,28 +629,23 @@ struct ListTerminalApprovalBar: View {
 struct ListAskBar: View {
     let agentName: String
     let isEnabled: Bool
-    let onTap: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
                     Image(agentIcon: "bubble.left.fill")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.cyan)
-                    Text("\(agentName) asks")
+                    Text(L10n.text(.asksSuffix, agentName))
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(.cyan)
                 }
 
-                Text(isEnabled ? "Needs your input in Terminal" : "Terminal jump unavailable")
+                Text(isEnabled ? L10n.text(.chatNeedsInputInTerminal, agentName) : L10n.text(.chatTerminalUnavailable))
                     .font(.system(size: 11))
                     .foregroundColor(.white.opacity(0.8))
             }
-
-            Spacer(minLength: 0)
-
-            TerminalButton(isEnabled: isEnabled, onTap: onTap)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -665,7 +682,7 @@ struct InlineApprovalButtons: View {
     var body: some View {
         HStack(spacing: 6) {
             ForEach(supportedActions, id: \.self) { action in
-                let isEnabled = action != .terminal || isTerminalEnabled
+                let isEnabled = true
                 Button {
                     if isEnabled {
                         onAction(action)
@@ -694,24 +711,15 @@ struct InlineApprovalButtons: View {
 
     @ViewBuilder
     private func label(for action: ApprovalAction) -> some View {
-        if action == .terminal {
-            HStack(spacing: 3) {
-                Image(agentIcon: "terminal")
-                    .font(.system(size: 9, weight: .medium))
-                Text(isTerminalEnabled ? "Jump" : "Unavailable")
-            }
-        } else {
-            Text(compactLabel(for: action))
-        }
+        Text(compactLabel(for: action))
     }
 
     private func compactLabel(for action: ApprovalAction) -> String {
         switch action {
-        case .deny: return "Deny"
-        case .allowOnce: return "Once"
-        case .allowAlways: return "Always"
-        case .autoExecute: return "Auto"
-        case .terminal: return "Jump"
+        case .deny: return L10n.text(.approvalDeny)
+        case .allowOnce: return L10n.text(.approvalOnce)
+        case .allowAlways: return L10n.text(.approvalAlways)
+        case .autoExecute: return L10n.text(.approvalAuto)
         }
     }
 
@@ -719,7 +727,7 @@ struct InlineApprovalButtons: View {
         guard isEnabled else { return .white.opacity(0.35) }
         switch action {
         case .deny: return .white.opacity(0.7)
-        case .allowOnce, .allowAlways, .autoExecute, .terminal: return .black
+        case .allowOnce, .allowAlways, .autoExecute: return .black
         }
     }
 
@@ -728,7 +736,7 @@ struct InlineApprovalButtons: View {
         switch action {
         case .deny:
             return Color.white.opacity(0.1)
-        case .allowOnce, .terminal:
+        case .allowOnce:
             return Color.white.opacity(0.92)
         case .allowAlways:
             return Color(red: 0.95, green: 0.60, blue: 0.18)
@@ -765,57 +773,3 @@ struct IconButton: View {
 }
 
 // MARK: - Compact Terminal Button (inline in description)
-
-struct CompactTerminalButton: View {
-    let isEnabled: Bool
-    let onTap: () -> Void
-
-    var body: some View {
-        Button {
-            if isEnabled {
-                onTap()
-            }
-        } label: {
-            HStack(spacing: 2) {
-                Image(agentIcon: "terminal")
-                    .font(.system(size: 8, weight: .medium))
-                Text(isEnabled ? "Jump to Terminal" : "Terminal unavailable")
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .foregroundColor(isEnabled ? .white.opacity(0.9) : .white.opacity(0.3))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(isEnabled ? Color.white.opacity(0.15) : Color.white.opacity(0.05))
-            .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Terminal Button
-
-struct TerminalButton: View {
-    let isEnabled: Bool
-    let onTap: () -> Void
-
-    var body: some View {
-        Button {
-            if isEnabled {
-                onTap()
-            }
-        } label: {
-            HStack(spacing: 3) {
-                Image(agentIcon: "terminal")
-                    .font(.system(size: 9, weight: .medium))
-                Text(isEnabled ? "Jump to Terminal" : "Terminal unavailable")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .foregroundColor(isEnabled ? .black : .white.opacity(0.4))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(isEnabled ? Color.white.opacity(0.95) : Color.white.opacity(0.1))
-            .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-}

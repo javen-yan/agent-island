@@ -37,6 +37,8 @@ pub struct BridgeProfile {
     pub approval_command_patterns: Vec<String>,
     pub auto_approve_tools: Vec<String>,
     pub auto_approve_command_patterns: Vec<String>,
+    pub bridge_log_enabled: bool,
+    pub bridge_log_level: String,
 }
 
 impl BridgeProfile {
@@ -90,6 +92,15 @@ impl BridgeProfile {
                         .collect()
                 })
                 .unwrap_or_default(),
+            bridge_log_enabled: value
+                .get("bridgeLogEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            bridge_log_level: value
+                .get("bridgeLogLevel")
+                .and_then(Value::as_str)
+                .unwrap_or("info")
+                .to_string(),
         }
     }
 }
@@ -118,4 +129,18 @@ pub struct HookPayload {
 pub struct PermissionDecision {
     pub decision: Option<String>,
     pub reason: Option<String>,
+    pub message: Option<String>,
+    pub should_continue: Option<bool>,
+    pub stop_reason: Option<String>,
+    pub patch: Option<Value>,
+}
+
+impl PermissionDecision {
+    pub fn message_or_reason(&self) -> Option<&str> {
+        self.message.as_deref().or(self.reason.as_deref())
+    }
+
+    pub fn has_patch(&self) -> bool {
+        self.patch.is_some()
+    }
 }

@@ -424,8 +424,15 @@ private actor CodexTranscriptProvider: SessionTranscriptProvider {
                 return nil
             }
 
-            let input = decodeToolArguments(payload["arguments"])
-            let block = MessageBlock.toolUse(ToolUseBlock(id: callId, name: toolName, input: input))
+            let rawInput = decodeToolArguments(payload["arguments"])
+            let normalizedToolCall = normalizedToolCall(name: toolName, input: rawInput)
+            let block = MessageBlock.toolUse(
+                ToolUseBlock(
+                    id: callId,
+                    name: normalizedToolCall.name,
+                    input: normalizedToolCall.input
+                )
+            )
             return ChatMessage(
                 id: "\(timestamp.timeIntervalSince1970)-\(lineIndex)-tool-\(callId)",
                 role: .assistant,
@@ -603,6 +610,28 @@ private actor CodexTranscriptProvider: SessionTranscriptProvider {
         }
 
         return flattened
+    }
+
+    private func normalizedToolCall(name: String, input: [String: String]) -> (name: String, input: [String: String]) {
+        guard name == "exec_command" else {
+            return (name, input)
+        }
+
+        var normalizedInput = input
+        if normalizedInput["command"] == nil,
+           let command = normalizedInput["cmd"],
+           !command.isEmpty {
+            normalizedInput["command"] = command
+        }
+
+        if normalizedInput["description"] == nil,
+           let command = normalizedInput["command"],
+           !command.isEmpty {
+            let firstLine = command.components(separatedBy: .newlines).first ?? command
+            normalizedInput["description"] = String(firstLine.prefix(80))
+        }
+
+        return ("Bash", normalizedInput)
     }
 
     private func resolveTranscriptPath(for session: SessionState) -> String? {

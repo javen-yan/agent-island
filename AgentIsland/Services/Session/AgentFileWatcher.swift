@@ -58,6 +58,7 @@ class AgentFileWatcher {
         guard FileManager.default.fileExists(atPath: filePath),
               let handle = FileHandle(forReadingAtPath: filePath) else {
             logger.warning("Failed to open agent file: \(self.filePath, privacy: .public)")
+            AppDiagnosticsLogger.log(.error, category: .session, "Failed to open agent file path=\(self.filePath)")
             return
         }
 
@@ -69,6 +70,7 @@ class AgentFileWatcher {
             lastOffset = try handle.seekToEnd()
         } catch {
             logger.error("Failed to seek to end: \(error.localizedDescription, privacy: .public)")
+            AppDiagnosticsLogger.log(.error, category: .session, "Failed to seek agent file path=\(self.filePath) error=\(error.localizedDescription)")
             return
         }
 
@@ -92,6 +94,7 @@ class AgentFileWatcher {
         newSource.resume()
 
         logger.debug("Started watching agent file: \(self.agentId.prefix(8), privacy: .public) for task: \(self.taskToolId.prefix(12), privacy: .public)")
+        AppDiagnosticsLogger.log(.debug, category: .session, "Started agent file watcher agent=\(self.agentId) task=\(self.taskToolId) session=\(self.sessionId)")
     }
 
     private func parseTools() {
@@ -102,6 +105,7 @@ class AgentFileWatcher {
 
         seenToolIds = Set(tools.map { $0.id })
         logger.debug("Agent \(self.agentId.prefix(8), privacy: .public) has \(tools.count) tools")
+        AppDiagnosticsLogger.log(.trace, category: .session, "Agent file watcher agent=\(self.agentId) tool_count=\(tools.count) session=\(self.sessionId)")
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -123,6 +127,7 @@ class AgentFileWatcher {
     private func stopInternal() {
         if source != nil {
             logger.debug("Stopped watching agent file: \(self.agentId.prefix(8), privacy: .public)")
+            AppDiagnosticsLogger.log(.debug, category: .session, "Stopped agent file watcher agent=\(self.agentId) session=\(self.sessionId)")
         }
         source?.cancel()
         source = nil
@@ -162,6 +167,7 @@ class AgentFileWatcherManager {
         watchers[key] = watcher
 
         logger.info("Started agent watcher for task \(taskToolId.prefix(12), privacy: .public)")
+        AppDiagnosticsLogger.log(.info, category: .session, "Started agent watcher task=\(taskToolId) agent=\(agentId) session=\(sessionId)")
     }
 
     /// Stop watching a specific Task's agent file

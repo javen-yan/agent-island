@@ -25,12 +25,11 @@ actor ApprovalPolicyExecutor {
             return .unavailable
         }
 
-        if permission.mode == .terminal {
-            return .requiresTerminal
-        }
-
-        switch session.agentType.approvalCapability.kind {
+        switch session.approvalCapability.kind {
         case .nativeInteractive:
+            guard session.approvalCapability.supportedPolicies.contains(policy) else {
+                return .unsupported
+            }
             return await executeNativeInteractive(
                 policy: policy,
                 sessionId: sessionId,
@@ -51,9 +50,12 @@ actor ApprovalPolicyExecutor {
         switch policy {
         case .deny:
             await HookSocketServer.shared.respondToPermission(
+                sessionId: sessionId,
                 toolUseId: permission.toolUseId,
-                decision: "deny",
-                reason: nil
+                action: UnifiedAgentAction(
+                    targetEventId: permission.toolUseId,
+                    decision: .deny
+                )
             )
             await SessionStore.shared.process(
                 .permissionDenied(sessionId: sessionId, toolUseId: permission.toolUseId, reason: nil)
@@ -72,21 +74,27 @@ actor ApprovalPolicyExecutor {
         }
     }
 
-    func applyAutomaticPolicyIfNeeded(for event: HookEvent) async -> ApprovalExecutionResult {
-        guard event.shouldAwaitPermissionResponse,
-              event.agentType.approvalCapability.kind == .nativeInteractive,
+    func applyAutomaticPolicyIfNeeded(for event: UnifiedAgentEvent) async -> ApprovalExecutionResult {
+        guard event.kind == .permissionRequested,
+              event.providerCapabilitiesBaseline.approvalCapability(
+                approvalMode: event.approvalMode
+              ).supportedPolicies.contains(.allowAlways),
               let policy = await ApprovalPolicyStore.shared.matchingPolicy(for: event),
               policy == .allowAlways || policy == .autoExecute else {
             return .unavailable
         }
 
-        return await execute(policy: .allowOnce, sessionId: event.sessionId)
+        return await execute(policy: policy == .autoExecute ? .autoExecute : .allowOnce, sessionId: event.sessionId)
     }
 
     private func approve(sessionId: String, permission: PermissionContext) async -> ApprovalExecutionResult {
         await HookSocketServer.shared.respondToPermission(
+            sessionId: sessionId,
             toolUseId: permission.toolUseId,
-            decision: "allow"
+            action: UnifiedAgentAction(
+                targetEventId: permission.toolUseId,
+                decision: .allow
+            )
         )
         await SessionStore.shared.process(
             .permissionApproved(sessionId: sessionId, toolUseId: permission.toolUseId)

@@ -2,7 +2,6 @@ import AppKit
 import IOKit
 import Mixpanel
 import Sparkle
-import SwiftUI
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
