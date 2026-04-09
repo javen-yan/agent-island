@@ -1,0 +1,116 @@
+use serde_json::{json, Value};
+
+use crate::protocol::{BridgeProfile, PermissionDecision};
+
+use super::{
+    default_extra_payload, default_process_info, normalize_event_name, normalize_input_with_options,
+    BridgeCapabilities, NormalizedInput, NormalizedInputOptions, PermissionCapability, ProcessInfo,
+    SourceAdapter,
+    HOOK_EVENT_SESSION_END, HOOK_EVENT_SESSION_START, HOOK_STATUS_ENDED,
+    HOOK_STATUS_PROCESSING, HOOK_STATUS_RUNNING_TOOL, HOOK_STATUS_WAITING_FOR_INPUT,
+    INTERNAL_EVENT_SESSION_ENDED, INTERNAL_EVENT_SESSION_STARTED, INTERNAL_EVENT_TOOL_DID_RUN,
+    INTERNAL_EVENT_TOOL_WILL_RUN, INTERNAL_EVENT_UNKNOWN,
+};
+
+pub struct ProviderTemplateAdapter;
+
+const PROVIDER_TOOL_NAME_PATHS: &[&[&str]] = &[
+    &["tool_name"],
+    &["toolName"],
+    &["tool"],
+    &["payload", "name"],
+    &["params", "name"],
+];
+
+const PROVIDER_TOOL_USE_ID_PATHS: &[&[&str]] = &[
+    &["tool_use_id"],
+    &["toolUseId"],
+    &["call_id"],
+    &["callId"],
+    &["params", "callId"],
+];
+
+const PROVIDER_OPTIONS: NormalizedInputOptions<'static> = NormalizedInputOptions {
+    tool_name_paths: PROVIDER_TOOL_NAME_PATHS,
+    tool_use_id_paths: PROVIDER_TOOL_USE_ID_PATHS,
+    session_id_keys: &["session_id", "sessionId"],
+    cwd_keys: &["cwd", "working_directory"],
+    transcript_path_keys: &["transcript_path", "transcriptPath"],
+    notification_type_keys: &["notification_type", "notificationType"],
+    message_keys: &["message", "text", "prompt"],
+};
+
+impl SourceAdapter for ProviderTemplateAdapter {
+    fn capabilities(&self) -> BridgeCapabilities {
+        BridgeCapabilities {
+            permission: PermissionCapability {
+                approval_request_events: &[],
+            },
+        }
+    }
+
+    fn normalize_input(&self, input: &Value) -> NormalizedInput {
+        let mut normalized = normalize_input_with_options(input, &PROVIDER_OPTIONS);
+
+        if let Some(method) = input.get("method").and_then(Value::as_str) {
+            normalized.hook_event = normalize_event_name(method);
+        }
+
+        normalized
+    }
+
+    fn should_emit_event(&self, _normalized: &NormalizedInput) -> bool {
+        true
+    }
+
+    fn status_for_event(&self, normalized: &NormalizedInput) -> String {
+        match normalized.hook_event.as_str() {
+            HOOK_EVENT_SESSION_START => HOOK_STATUS_WAITING_FOR_INPUT.to_string(),
+            HOOK_EVENT_SESSION_END => HOOK_STATUS_ENDED.to_string(),
+            "PreToolUse" => HOOK_STATUS_RUNNING_TOOL.to_string(),
+            "PostToolUse" => HOOK_STATUS_PROCESSING.to_string(),
+            _ => HOOK_STATUS_PROCESSING.to_string(),
+        }
+    }
+
+    fn process_info(&self, input: &Value) -> ProcessInfo {
+        default_process_info(input)
+    }
+
+    fn requires_approval(&self, _profile: &BridgeProfile, _normalized: &NormalizedInput) -> bool {
+        false
+    }
+
+    fn internal_event(
+        &self,
+        _profile: &BridgeProfile,
+        normalized: &NormalizedInput,
+        _status: &str,
+    ) -> String {
+        match normalized.hook_event.as_str() {
+            HOOK_EVENT_SESSION_START => INTERNAL_EVENT_SESSION_STARTED.to_string(),
+            HOOK_EVENT_SESSION_END => INTERNAL_EVENT_SESSION_ENDED.to_string(),
+            "PreToolUse" => INTERNAL_EVENT_TOOL_WILL_RUN.to_string(),
+            "PostToolUse" => INTERNAL_EVENT_TOOL_DID_RUN.to_string(),
+            _ => INTERNAL_EVENT_UNKNOWN.to_string(),
+        }
+    }
+
+    fn extra_payload(&self, _profile: &BridgeProfile, normalized: &NormalizedInput) -> Value {
+        let mut extra = default_extra_payload(normalized);
+        if let Value::Object(ref mut object) = extra {
+            object.insert("template".to_string(), Value::String("fill me".to_string()));
+        }
+        extra
+    }
+
+    fn permission_response(
+        &self,
+        _response: &PermissionDecision,
+        _hook_event: &str,
+    ) -> Option<Value> {
+        Some(json!({
+            "todo": "implement provider-specific response shape"
+        }))
+    }
+}

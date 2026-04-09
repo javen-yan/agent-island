@@ -147,7 +147,7 @@ struct AgentInteractionRegistry {
     private let adapters: [AgentPlatform: any AgentInteractionAdapter] = [
         .claude: TmuxAgentInteractionAdapter(agentType: .claude, supportsMessaging: true),
         .codex: TmuxAgentInteractionAdapter(agentType: .codex, supportsMessaging: true),
-        .gemini: TmuxAgentInteractionAdapter(agentType: .gemini, supportsMessaging: false)
+        .gemini: TmuxAgentInteractionAdapter(agentType: .gemini, supportsMessaging: true)
     ]
 
     nonisolated func capabilities(for agentType: AgentPlatform) -> Capabilities {
@@ -227,12 +227,28 @@ private struct TmuxAgentInteractionAdapter: AgentInteractionAdapter {
     let supportsMessaging: Bool
     let supportsSessionControl = true
 
-    private func backendAdapter() -> any TerminalMultiplexerAdapter {
-        TerminalMultiplexerRegistry.shared.adapter(for: AppSettings.terminalBackend)
+    private func resolvedBackend(for session: SessionState) async -> TerminalBackend {
+        await TerminalMultiplexerRegistry.shared.resolvedOrFallbackBackend(
+            pid: session.pid,
+            tty: session.tty
+        )
+    }
+
+    private func backendAdapter(for session: SessionState) async -> any TerminalMultiplexerAdapter {
+        let backend = await resolvedBackend(for: session)
+        return await TerminalMultiplexerRegistry.shared.adapter(for: backend)
     }
 
     nonisolated func canSendMessages(in session: SessionState) -> Bool {
-        supportsMessaging && session.isInTerminalMultiplexer && session.tty != nil
+        guard supportsMessaging, session.isInTerminalMultiplexer, session.tty != nil else {
+            return false
+        }
+
+        if agentType == .codex {
+            return session.phase == .waitingForInput
+        }
+
+        return true
     }
 
     func sendMessage(_ message: String, in session: SessionState) async -> Bool {
@@ -240,7 +256,7 @@ private struct TmuxAgentInteractionAdapter: AgentInteractionAdapter {
             return false
         }
 
-        return await backendAdapter().sendMessage(message, tty: tty, agentPid: session.pid)
+        return await backendAdapter(for: session).sendMessage(message, tty: tty, agentPid: session.pid)
     }
 
     nonisolated func canInterruptTurn(in session: SessionState) -> Bool {
@@ -253,7 +269,7 @@ private struct TmuxAgentInteractionAdapter: AgentInteractionAdapter {
             return false
         }
 
-        return await backendAdapter().sendSpecialKey(.escape, tty: tty, agentPid: session.pid)
+        return await backendAdapter(for: session).sendSpecialKey(.escape, tty: tty, agentPid: session.pid)
     }
 
     nonisolated func canTerminateSession(in session: SessionState) -> Bool {
@@ -268,11 +284,11 @@ private struct TmuxAgentInteractionAdapter: AgentInteractionAdapter {
         }
 
         if session.phase.isActive || session.phase.isWaitingForApproval {
-            _ = await backendAdapter().sendSpecialKey(.escape, tty: tty, agentPid: session.pid)
+            _ = await backendAdapter(for: session).sendSpecialKey(.escape, tty: tty, agentPid: session.pid)
             try? await Task.sleep(for: .milliseconds(120))
         }
 
-        return await backendAdapter().sendMessage(exitCommand.text, tty: tty, agentPid: session.pid)
+        return await backendAdapter(for: session).sendMessage(exitCommand.text, tty: tty, agentPid: session.pid)
     }
 }
 

@@ -20,8 +20,8 @@ enum AgentExitCommand: Sendable {
 
     var buttonLabel: String {
         switch self {
-        case .quit: return "Quit"
-        case .exit: return "Exit"
+        case .quit: return L10n.text(.exitQuit)
+        case .exit: return L10n.text(.exitExit)
         }
     }
 }
@@ -31,18 +31,28 @@ struct AgentTerminalControlProfile: Sendable {
     let exitCommand: AgentExitCommand?
 }
 
+struct AgentBehaviorProfile: Sendable {
+    let displayNameKey: L10nKey
+    let accentColor: Color
+    let iconSymbol: String
+    let terminalControlProfile: AgentTerminalControlProfile
+    let autoRevealOnTurnCompletion: Bool
+    let supportsPostTurnFollowUpInIsland: Bool
+    let showsLastReplyInCompletionSummary: Bool
+}
+
 enum ApprovalPolicy: String, Codable, CaseIterable, Sendable {
     case deny
     case allowOnce
     case allowAlways
     case autoExecute
 
-    var displayName: String {
+    nonisolated var displayName: String {
         switch self {
-        case .deny: return "Deny"
-        case .allowOnce: return "Allow Once"
-        case .allowAlways: return "Allow Always"
-        case .autoExecute: return "Auto Execute"
+        case .deny: return L10n.text(.approvalDeny)
+        case .allowOnce: return L10n.text(.approvalAllowOnce)
+        case .allowAlways: return L10n.text(.approvalAllowAlways)
+        case .autoExecute: return L10n.text(.approvalAutoExecute)
         }
     }
 }
@@ -52,15 +62,32 @@ enum ApprovalAction: String, CaseIterable, Sendable {
     case allowOnce
     case allowAlways
     case autoExecute
-    case terminal
 
-    var label: String {
+    nonisolated var label: String {
         switch self {
-        case .deny: return "Deny"
-        case .allowOnce: return "Allow Once"
-        case .allowAlways: return "Allow Always"
-        case .autoExecute: return "Auto Execute"
-        case .terminal: return "Jump to Terminal"
+        case .deny: return L10n.text(.approvalDeny)
+        case .allowOnce: return L10n.text(.approvalAllowOnce)
+        case .allowAlways: return L10n.text(.approvalAllowAlways)
+        case .autoExecute: return L10n.text(.approvalAutoExecute)
+        }
+    }
+
+    nonisolated func displayLabel(
+        provider: AgentPlatform,
+        compact: Bool = false
+    ) -> String {
+        switch self {
+        case .allowOnce:
+            if provider == .codex {
+                return L10n.text(.approvalContinue)
+            }
+            return compact ? L10n.text(.approvalOnce) : label
+        case .allowAlways:
+            return compact ? L10n.text(.approvalAlways) : label
+        case .autoExecute:
+            return compact ? L10n.text(.approvalAuto) : label
+        case .deny:
+            return label
         }
     }
 }
@@ -82,74 +109,80 @@ enum AgentPlatform: String, Codable, CaseIterable, Sendable {
     case codex
     case gemini
 
-    var displayName: String {
+    private nonisolated var profile: AgentBehaviorProfile {
         switch self {
-        case .claude: return "Claude"
-        case .codex: return "Codex"
-        case .gemini: return "Gemini"
+        case .claude:
+            return AgentBehaviorProfile(
+                displayNameKey: .agentNameClaude,
+                accentColor: TerminalColors.claude,
+                iconSymbol: "provider.claude",
+                terminalControlProfile: AgentTerminalControlProfile(
+                    supportsInterrupt: true,
+                    exitCommand: .exit
+                ),
+                autoRevealOnTurnCompletion: false,
+                supportsPostTurnFollowUpInIsland: false,
+                showsLastReplyInCompletionSummary: false
+            )
+        case .codex:
+            return AgentBehaviorProfile(
+                displayNameKey: .agentNameCodex,
+                accentColor: Color(red: 0.06, green: 0.64, blue: 0.50),
+                iconSymbol: "provider.codex",
+                terminalControlProfile: AgentTerminalControlProfile(
+                    supportsInterrupt: true,
+                    exitCommand: .quit
+                ),
+                autoRevealOnTurnCompletion: true,
+                supportsPostTurnFollowUpInIsland: true,
+                showsLastReplyInCompletionSummary: true
+            )
+        case .gemini:
+            return AgentBehaviorProfile(
+                displayNameKey: .agentNameGemini,
+                accentColor: Color(red: 0.26, green: 0.52, blue: 0.96),
+                iconSymbol: "provider.gemini",
+                terminalControlProfile: AgentTerminalControlProfile(
+                    supportsInterrupt: true,
+                    exitCommand: .quit
+                ),
+                autoRevealOnTurnCompletion: false,
+                supportsPostTurnFollowUpInIsland: false,
+                showsLastReplyInCompletionSummary: false
+            )
         }
+    }
+
+    nonisolated var displayName: String {
+        L10n.text(profile.displayNameKey)
     }
 
     var accentColor: Color {
-        switch self {
-        case .claude:
-            return TerminalColors.claude
-        case .codex:
-            return Color(red: 0.06, green: 0.64, blue: 0.50)
-        case .gemini:
-            return Color(red: 0.26, green: 0.52, blue: 0.96)
-        }
+        profile.accentColor
     }
 
     var iconSymbol: String {
-        switch self {
-        case .claude: return "brain.head.profile.fill"
-        case .codex: return "terminal"
-        case .gemini: return "sparkles"
-        }
+        profile.iconSymbol
     }
 
     nonisolated var approvalCapability: ApprovalCapability {
-        switch self {
-        case .claude:
-            return ApprovalCapability(
-                kind: .nativeInteractive,
-                supportedPolicies: [.deny, .allowOnce, .allowAlways, .autoExecute],
-                supportedActions: [.deny, .allowOnce, .allowAlways, .autoExecute]
-            )
-        case .codex:
-            return ApprovalCapability(
-                kind: .nativeInteractive,
-                supportedPolicies: [.deny, .allowOnce],
-                supportedActions: [.deny, .allowOnce]
-            )
-        case .gemini:
-            return ApprovalCapability(
-                kind: .terminalOnly,
-                supportedPolicies: [.deny, .allowOnce],
-                supportedActions: [.terminal]
-            )
-        }
+        ProviderCapabilities.baseline(for: self).approvalCapability()
     }
 
     nonisolated var terminalControlProfile: AgentTerminalControlProfile {
-        switch self {
-        case .claude:
-            return AgentTerminalControlProfile(
-                supportsInterrupt: true,
-                exitCommand: .exit
-            )
-        case .codex:
-            return AgentTerminalControlProfile(
-                supportsInterrupt: true,
-                exitCommand: .quit
-            )
-        case .gemini:
-            return AgentTerminalControlProfile(
-                supportsInterrupt: true,
-                exitCommand: .quit
-            )
-        }
+        profile.terminalControlProfile
+    }
+
+    nonisolated var autoRevealOnTurnCompletion: Bool {
+        profile.autoRevealOnTurnCompletion
+    }
+
+    nonisolated var supportsPostTurnFollowUpInIsland: Bool {
+        profile.supportsPostTurnFollowUpInIsland
+    }
+
+    nonisolated var showsLastReplyInCompletionSummary: Bool {
+        profile.showsLastReplyInCompletionSummary
     }
 
     static func from(rawValue: String?) -> AgentPlatform {

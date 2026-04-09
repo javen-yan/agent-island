@@ -57,6 +57,7 @@ final class CodexInterruptWatcher {
         guard FileManager.default.fileExists(atPath: filePath),
               let handle = FileHandle(forReadingAtPath: filePath) else {
             codexInterruptLogger.warning("Failed to open Codex transcript: \(self.filePath, privacy: .public)")
+            AppDiagnosticsLogger.log(.error, category: .session, "Failed to open Codex transcript path=\(self.filePath)")
             return
         }
 
@@ -66,6 +67,7 @@ final class CodexInterruptWatcher {
             lastOffset = try handle.seekToEnd()
         } catch {
             codexInterruptLogger.error("Failed to seek Codex transcript: \(error.localizedDescription, privacy: .public)")
+            AppDiagnosticsLogger.log(.error, category: .session, "Failed to seek Codex transcript path=\(self.filePath) error=\(error.localizedDescription)")
             return
         }
 
@@ -89,6 +91,7 @@ final class CodexInterruptWatcher {
         newSource.resume()
 
         codexInterruptLogger.debug("Started watching Codex transcript: \(self.sessionId.prefix(8), privacy: .public)...")
+        AppDiagnosticsLogger.log(.debug, category: .session, "Started Codex interrupt watcher session=\(self.sessionId)")
     }
 
     private func checkForInterrupt() {
@@ -120,6 +123,7 @@ final class CodexInterruptWatcher {
         for line in lines where !line.isEmpty {
             if isInterruptLine(line) {
                 codexInterruptLogger.info("Detected Codex interrupt in session: \(self.sessionId.prefix(8), privacy: .public)")
+                AppDiagnosticsLogger.log(.info, category: .session, "Detected Codex interrupt session=\(self.sessionId)")
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.delegate?.didDetectInterrupt(sessionId: self.sessionId)
@@ -160,6 +164,7 @@ final class CodexInterruptWatcher {
     private func stopInternal() {
         if source != nil {
             codexInterruptLogger.debug("Stopped watching Codex transcript: \(self.sessionId.prefix(8), privacy: .public)...")
+            AppDiagnosticsLogger.log(.debug, category: .session, "Stopped Codex interrupt watcher session=\(self.sessionId)")
         }
         source?.cancel()
         source = nil

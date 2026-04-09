@@ -24,6 +24,10 @@ pub fn send_sync(socket_path: &str, payload: &HookPayload) -> Result<PermissionD
             return Ok(PermissionDecision {
                 decision: None,
                 reason: None,
+                message: None,
+                should_continue: None,
+                stop_reason: None,
+                patch: None,
             })
         }
     };
@@ -39,10 +43,19 @@ pub fn send_sync(socket_path: &str, payload: &HookPayload) -> Result<PermissionD
         return Ok(PermissionDecision {
             decision: None,
             reason: None,
+            message: None,
+            should_continue: None,
+            stop_reason: None,
+            patch: None,
         });
     }
 
     let json: serde_json::Value = serde_json::from_slice(&response)?;
+    let message = json
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
     Ok(PermissionDecision {
         decision: json
             .get("decision")
@@ -51,6 +64,14 @@ pub fn send_sync(socket_path: &str, payload: &HookPayload) -> Result<PermissionD
         reason: json
             .get("reason")
             .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| message.clone()),
+        message,
+        should_continue: json.get("continue").and_then(|v| v.as_bool()),
+        stop_reason: json
+            .get("stop_reason")
+            .and_then(|v| v.as_str())
             .map(str::to_owned),
+        patch: json.get("patch").cloned(),
     })
 }

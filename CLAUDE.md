@@ -73,7 +73,7 @@ UI/state logic should prefer normalized fields from bridge payloads over raw off
 - `permission_mode` (approval handling mode)
 - `extra` (agent-specific passthrough)
 
-Reference: `docs/internal-hook-protocol.md`.
+Reference: `docs/unified-agent-protocol.md`.
 
 ### Permission and hook installation model
 

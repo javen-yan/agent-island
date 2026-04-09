@@ -8,27 +8,11 @@
 
 import Foundation
 
-enum AgentHookDomainEvent: Sendable {
-    case notification(HookEvent.NotificationType?)
-    case preCompact
-    case sessionStart
-    case sessionEnd
-    case stop
-    case subagentStop
-    case preToolUse
-    case postToolUse
-    case userPromptSubmit
-    case permissionRequest
-    case unknown(String)
-}
-
 /// All events that can affect session state
 /// This is the single entry point for state mutations
 enum SessionEvent: Sendable {
-    // MARK: - Hook Events (from HookSocketServer)
-
-    /// A hook event was received from a supported agent
-    case hookReceived(HookEvent)
+    /// A unified agent event was received from the translation layer
+    case unifiedEventReceived(UnifiedAgentEvent)
 
     // MARK: - Permission Events (user actions)
 
@@ -143,40 +127,6 @@ struct ToolCompletionResult: Sendable {
 // MARK: - Hook Event Extensions
 
 extension HookEvent {
-    /// AgentIsland's stable event projection.
-    /// Prefer this over `event` in UI and state logic; raw official events are fallback-only.
-    nonisolated var sessionPhase: SessionPhase {
-        if case .preCompact = domainEvent {
-            return .compacting
-        }
-
-        switch status {
-        case HookEvent.Status.waitingForApproval.rawValue, HookEvent.Status.terminalApprovalRequired.rawValue:
-            return .waitingForApproval(PermissionContext(
-                toolUseId: toolUseId ?? "",
-                toolName: tool ?? "unknown",
-                toolInput: toolInput,
-                mode: {
-                    switch approvalRequestType {
-                    case .terminal:
-                        return .terminal
-                    case .none, .app:
-                        return .nativeApp
-                    }
-                }(),
-                receivedAt: Date()
-            ))
-        case HookEvent.Status.waitingForInput.rawValue:
-            return .waitingForInput
-        case HookEvent.Status.runningTool.rawValue, HookEvent.Status.processing.rawValue, HookEvent.Status.starting.rawValue:
-            return .processing
-        case HookEvent.Status.compacting.rawValue:
-            return .compacting
-        default:
-            return .idle
-        }
-    }
-
     nonisolated var approvalRequestType: HookEvent.ApprovalRequestType {
         if permissionModeValue == .terminal || status == HookEvent.Status.terminalApprovalRequired.rawValue {
             return .terminal
@@ -187,34 +137,23 @@ extension HookEvent {
         return .none
     }
 
+    nonisolated var resolvedApprovalMode: ApprovalMode? {
+        switch approvalRequestType {
+        case .terminal:
+            return .terminal
+        case .app:
+            return .nativeApp
+        case .none:
+            return nil
+        }
+    }
+
     nonisolated var shouldAwaitPermissionResponse: Bool {
         switch approvalRequestType {
         case .none:
             return false
         case .app, .terminal:
             return true
-        }
-    }
-
-    nonisolated var isSessionEnded: Bool {
-        status == HookEvent.Status.ended.rawValue
-    }
-
-    nonisolated var isPermissionPromptNotification: Bool {
-        switch domainEvent {
-        case .notification(.permissionPrompt):
-            return true
-        default:
-            return false
-        }
-    }
-
-    nonisolated var isIdlePromptNotification: Bool {
-        switch domainEvent {
-        case .notification(.idlePrompt):
-            return true
-        default:
-            return false
         }
     }
 
@@ -231,64 +170,65 @@ extension HookEvent {
         return HookEvent.PermissionMode(rawValue: permissionMode)
     }
 
-    nonisolated var legacyDomainEvent: AgentHookDomainEvent {
-        switch event {
-        case HookEvent.EventName.notification.rawValue:
-            return .notification(NotificationType(rawValue: notificationType ?? "") ?? .unknown)
-        case HookEvent.EventName.preCompact.rawValue:
-            return .preCompact
-        case HookEvent.EventName.sessionStart.rawValue:
-            return .sessionStart
-        case HookEvent.EventName.sessionEnd.rawValue:
-            return .sessionEnd
-        case HookEvent.EventName.stop.rawValue:
-            return .stop
-        case HookEvent.EventName.subagentStop.rawValue:
-            return .subagentStop
-        case HookEvent.EventName.beforeTool.rawValue, HookEvent.EventName.preToolUse.rawValue:
-            return .preToolUse
-        case HookEvent.EventName.afterTool.rawValue, HookEvent.EventName.postToolUse.rawValue:
-            return .postToolUse
-        case HookEvent.EventName.userPromptSubmit.rawValue:
-            return .userPromptSubmit
-        case HookEvent.EventName.permissionRequest.rawValue:
-            return .permissionRequest
-        default:
-            return .unknown(event)
-        }
-    }
-
     nonisolated var usesLegacyEventFallback: Bool {
         internalEventValue == .unknown
     }
 
-    nonisolated var domainEvent: AgentHookDomainEvent {
-        // Internal protocol wins. Raw official event names are only fallback compatibility.
+    nonisolated var isSessionEndLike: Bool {
         switch internalEventValue {
-        case .notification:
-            return .notification(NotificationType(rawValue: notificationType ?? "") ?? .unknown)
-        case .idlePrompt:
-            return .notification(.idlePrompt)
-        case .preCompact:
-            return .preCompact
-        case .sessionStarted:
-            return .sessionStart
         case .sessionEnded:
-            return .sessionEnd
-        case .stopped:
-            return .stop
-        case .subagentStopped:
-            return .subagentStop
-        case .toolWillRun:
-            return .preToolUse
-        case .toolDidRun:
-            return .postToolUse
-        case .userPromptSubmitted:
-            return .userPromptSubmit
-        case .permissionRequested:
-            return .permissionRequest
+            return true
         case .unknown:
-            return legacyDomainEvent
+            return event == HookEvent.EventName.sessionEnd.rawValue
+        default:
+            return false
+        }
+    }
+
+    nonisolated var isStopLike: Bool {
+        switch internalEventValue {
+        case .stopped:
+            return true
+        case .unknown:
+            return event == HookEvent.EventName.stop.rawValue
+        default:
+            return false
+        }
+    }
+
+    nonisolated var isPreToolLike: Bool {
+        switch internalEventValue {
+        case .toolWillRun, .permissionRequested:
+            return true
+        case .unknown:
+            return event == HookEvent.EventName.beforeTool.rawValue
+                || event == HookEvent.EventName.preToolUse.rawValue
+                || event == HookEvent.EventName.permissionRequest.rawValue
+        default:
+            return false
+        }
+    }
+
+    nonisolated var isPostToolLike: Bool {
+        switch internalEventValue {
+        case .toolDidRun:
+            return true
+        case .unknown:
+            return event == HookEvent.EventName.afterTool.rawValue
+                || event == HookEvent.EventName.postToolUse.rawValue
+        default:
+            return false
+        }
+    }
+
+    nonisolated var isSubagentStopLike: Bool {
+        switch internalEventValue {
+        case .subagentStopped:
+            return true
+        case .unknown:
+            return event == HookEvent.EventName.subagentStop.rawValue
+        default:
+            return false
         }
     }
 
@@ -299,67 +239,14 @@ extension HookEvent {
         return "internal=\(internalName) official=\(officialName) permission=\(permission)"
     }
 
-    /// Determine the target session phase based on this hook event
-    nonisolated func determinePhase() -> SessionPhase {
-        // PreCompact takes priority
-        if case .preCompact = domainEvent {
-            return .compacting
-        }
-
-        // Permission request creates waitingForApproval state
-        if shouldAwaitPermissionResponse, let tool = tool {
-            return .waitingForApproval(PermissionContext(
-                toolUseId: toolUseId ?? "",
-                toolName: tool,
-                toolInput: toolInput,
-                mode: {
-                    switch approvalRequestType {
-                    case .terminal:
-                        return .terminal
-                    case .none, .app:
-                        return .nativeApp
-                    }
-                }(),
-                receivedAt: Date()
-            ))
-        }
-
-        if case .notification(.idlePrompt) = domainEvent {
-            return .idle
-        }
-
-        switch status {
-        case HookEvent.Status.waitingForInput.rawValue:
-            return .waitingForInput
-        case HookEvent.Status.runningTool.rawValue, HookEvent.Status.processing.rawValue, HookEvent.Status.starting.rawValue:
-            return .processing
-        case HookEvent.Status.compacting.rawValue:
-            return .compacting
-        case HookEvent.Status.ended.rawValue:
-            return .ended
-        default:
-            return .idle
-        }
-    }
-
-    /// Whether this is a tool-related event
-    nonisolated var isToolEvent: Bool {
-        switch domainEvent {
-        case .preToolUse, .postToolUse, .permissionRequest:
-            return true
-        default:
-            return false
-        }
-    }
-
     /// Whether this event should trigger a file sync
     nonisolated var shouldSyncFile: Bool {
         guard AgentInteractionRegistry.shared.supportsConversationHistory(for: agentType) else {
             return false
         }
 
-        switch domainEvent {
-        case .userPromptSubmit, .preToolUse, .postToolUse, .stop:
+        switch unifiedEvent.kind {
+        case .turnInputSubmitted, .toolStarted, .toolCompleted, .turnCompleted:
             return true
         default:
             return false
@@ -372,8 +259,8 @@ extension HookEvent {
 extension SessionEvent: CustomStringConvertible {
     nonisolated var description: String {
         switch self {
-        case .hookReceived(let event):
-            return "hookReceived(\(event.agentType.rawValue):\(event.event), session: \(event.sessionId.prefix(8)))"
+        case .unifiedEventReceived(let event):
+            return "unifiedEventReceived(\(event.provider.rawValue):\(event.kind.rawValue), session: \(event.sessionId.prefix(8)))"
         case .permissionApproved(let sessionId, let toolUseId):
             return "permissionApproved(session: \(sessionId.prefix(8)), tool: \(toolUseId.prefix(12)))"
         case .permissionDenied(let sessionId, let toolUseId, _):

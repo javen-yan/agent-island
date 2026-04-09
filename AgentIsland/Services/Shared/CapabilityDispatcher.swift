@@ -17,12 +17,16 @@ actor DefaultCapabilityDispatcher {
 
         switch event {
         case .hookReceived(let hookEvent):
-            await SessionStore.shared.process(.hookReceived(hookEvent))
-            _ = await ApprovalPolicyExecutor.shared.applyAutomaticPolicyIfNeeded(for: hookEvent)
+            let unifiedEvent = hookEvent.unifiedEvent
+            AppDiagnosticsLogger.log(
+                .debug,
+                category: .dispatcher,
+                "Dispatching unified event kind=\(unifiedEvent.kind.rawValue) session=\(hookEvent.sessionId) provider=\(hookEvent.agentType.rawValue)"
+            )
+            await SessionStore.shared.process(.unifiedEventReceived(unifiedEvent))
+            _ = await ApprovalPolicyExecutor.shared.applyAutomaticPolicyIfNeeded(for: unifiedEvent)
 
-            let hookPhase = await MainActor.run { hookEvent.sessionPhase }
-
-            if hookPhase == .processing {
+            if unifiedEvent.shouldStartRuntimeObservation {
                 await MainActor.run {
                     AgentInteractionRegistry.shared.startObservingIfSupported(
                         sessionId: hookEvent.sessionId,
@@ -33,7 +37,7 @@ actor DefaultCapabilityDispatcher {
                 }
             }
 
-            if hookEvent.isSessionEnded {
+            if unifiedEvent.shouldStopRuntimeObservation {
                 await MainActor.run {
                     AgentInteractionRegistry.shared.stopObservingIfSupported(
                         sessionId: hookEvent.sessionId,
@@ -42,27 +46,34 @@ actor DefaultCapabilityDispatcher {
                 }
             }
 
-            if case .stop = hookEvent.domainEvent {
+            if unifiedEvent.shouldCancelPendingPermissions {
                 await HookSocketServer.shared.cancelPendingPermissions(sessionId: hookEvent.sessionId)
             }
 
-            if case .postToolUse = hookEvent.domainEvent,
-               let toolUseId = hookEvent.toolUseId {
+            if let toolUseId = unifiedEvent.completedToolCallId {
                 await HookSocketServer.shared.cancelPendingPermission(toolUseId: toolUseId)
             }
 
         case .permissionSocketFailed(let sessionId, let toolUseId):
+            AppDiagnosticsLogger.log(
+                .error,
+                category: .dispatcher,
+                "Permission socket failure session=\(sessionId) tool=\(toolUseId)"
+            )
             await SessionStore.shared.process(
                 .permissionSocketFailed(sessionId: sessionId, toolUseId: toolUseId)
             )
 
         case .historyLoadRequested(let sessionId, let cwd):
+            AppDiagnosticsLogger.log(.debug, category: .dispatcher, "History load requested session=\(sessionId) cwd=\(cwd)")
             await SessionStore.shared.process(.loadHistory(sessionId: sessionId, cwd: cwd))
 
         case .fileSyncReceived(let payload):
+            AppDiagnosticsLogger.log(.trace, category: .dispatcher, "File sync payload session=\(payload.sessionId)")
             await SessionStore.shared.process(.fileUpdated(payload))
 
         case .interruptDetected(let sessionId):
+            AppDiagnosticsLogger.log(.info, category: .dispatcher, "Interrupt detected session=\(sessionId)")
             await SessionStore.shared.process(.interruptDetected(sessionId: sessionId))
         }
     }

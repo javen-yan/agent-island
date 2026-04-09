@@ -13,6 +13,7 @@ KEYS_DIR="$PROJECT_DIR/.sparkle-keys"
 GITHUB_REPO="javen-yan/agent-island"
 
 PAGES_OUTPUT_DIR="${AGENT_ISLAND_PAGES_DIR:-$BUILD_DIR/pages}"
+PREPARE_GITHUB_APPCAST_SCRIPT="$PROJECT_DIR/scripts/prepare-github-appcast.sh"
 
 APP_PATH="$EXPORT_PATH/Agent Island.app"
 APP_NAME="AgentIsland"
@@ -250,20 +251,32 @@ echo ""
 # ============================================
 echo "=== Step 6: Preparing GitHub Pages Payload ==="
 
-if [ -f "$RELEASE_DIR/appcast/appcast.xml" ]; then
+if [ -z "$GITHUB_DOWNLOAD_URL" ]; then
+    echo "GitHub release URL unavailable"
+    echo "Skipping GitHub Pages payload preparation."
+elif [ ! -x "$PREPARE_GITHUB_APPCAST_SCRIPT" ]; then
+    echo "Helper script not executable: $PREPARE_GITHUB_APPCAST_SCRIPT"
+    echo "Skipping GitHub Pages payload preparation."
+elif [ ! -f "$KEYS_DIR/eddsa_private_key" ]; then
+    echo "Sparkle private key missing at $KEYS_DIR/eddsa_private_key"
+    echo "Skipping GitHub Pages payload preparation."
+else
     mkdir -p "$PAGES_OUTPUT_DIR"
-    cp "$RELEASE_DIR/appcast/appcast.xml" "$PAGES_OUTPUT_DIR/appcast.xml"
-
-    if [ -n "$GITHUB_DOWNLOAD_URL" ]; then
-        sed -i '' "s|url=\"[^\"]*$APP_NAME-$VERSION.dmg\"|url=\"$GITHUB_DOWNLOAD_URL\"|g" "$PAGES_OUTPUT_DIR/appcast.xml"
-        echo "Updated appcast.xml with GitHub release download URL"
-    fi
+    VERSION_TAG="v$VERSION" \
+    DMG_PATH="$DMG_PATH" \
+    OUTPUT_DIR="$PAGES_OUTPUT_DIR" \
+    SPARKLE_PRIVATE_KEY_FILE="$KEYS_DIR/eddsa_private_key" \
+    GITHUB_REPO="$GITHUB_REPO" \
+    "$PREPARE_GITHUB_APPCAST_SCRIPT"
 
     echo "Prepared appcast.xml at $PAGES_OUTPUT_DIR/appcast.xml"
     echo "Publish this file to GitHub Pages to serve Sparkle updates."
+fi
+
+if [ -f "$RELEASE_DIR/appcast/appcast.xml" ]; then
+    echo "Local Sparkle appcast remains available at: $RELEASE_DIR/appcast/appcast.xml"
 else
-    echo "Appcast not generated"
-    echo "Skipping GitHub Pages payload preparation."
+    echo "Local Sparkle appcast not generated."
 fi
 
 echo ""

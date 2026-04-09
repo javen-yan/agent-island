@@ -33,6 +33,12 @@ actor SessionStore {
     /// Sync debounce interval (100ms)
     private let syncDebounceNs: UInt64 = 100_000_000
 
+    /// Default number of recent chat items to retain in memory per session.
+    /// Older stable items are trimmed to keep long-running sessions bounded.
+    private var chatHistoryRetentionLimit: Int {
+        AppSettings.chatHistoryRetentionLimitSnapshot()
+    }
+
     // MARK: - Published State (for UI)
 
     /// Publisher for session state changes (nonisolated for Combine subscription from any context)
@@ -57,10 +63,11 @@ actor SessionStore {
     /// Process any session event - the ONLY way to mutate state
     func process(_ event: SessionEvent) async {
         Self.logger.debug("Processing: \(String(describing: event), privacy: .public)")
+        AppDiagnosticsLogger.log(.debug, category: .session, "Processing event=\(String(describing: event))")
 
         switch event {
-        case .hookReceived(let hookEvent):
-            await processHookEvent(hookEvent)
+        case .unifiedEventReceived(let unifiedEvent):
+            await processUnifiedEvent(unifiedEvent)
 
         case .permissionApproved(let sessionId, let toolUseId):
             await processPermissionApproved(sessionId: sessionId, toolUseId: toolUseId)
@@ -81,12 +88,14 @@ actor SessionStore {
             await processClearDetected(sessionId: sessionId)
 
         case .sessionEnded(let sessionId):
+            AppDiagnosticsLogger.log(.info, category: .session, "Session ended signal session=\(sessionId)")
             await processSessionEnd(sessionId: sessionId)
 
         case .loadHistory(let sessionId, let cwd):
             await loadHistoryFromFile(sessionId: sessionId, cwd: cwd)
 
         case .historyLoaded(let sessionId, let messages, let completedTools, let toolResults, let structuredResults, let conversationInfo, let phaseHint):
+            AppDiagnosticsLogger.log(.debug, category: .session, "History loaded session=\(sessionId) messages=\(messages.count)")
             await processHistoryLoaded(
                 sessionId: sessionId,
                 messages: messages,
@@ -127,114 +136,131 @@ actor SessionStore {
 
     // MARK: - Hook Event Processing
 
-    private func processHookEvent(_ event: HookEvent) async {
+    private func processUnifiedEvent(_ event: UnifiedAgentEvent) async {
         let sessionId = event.sessionId
         let isNewSession = sessions.index(forKey: sessionId) == nil
         var session = sessions[sessionId] ?? createSession(from: event)
 
-        // Track new session in Mixpanel
         if isNewSession {
             Mixpanel.mainInstance().track(event: "Session Started")
+            AppDiagnosticsLogger.log(.info, category: .session, "Session started session=\(sessionId) provider=\(event.provider.rawValue)")
         }
 
-        session.pid = event.pid
-        if let transcriptPath = event.transcriptPath, !transcriptPath.isEmpty {
-            session.transcriptPath = transcriptPath
-        }
-        if let pid = event.pid {
-            let tree = ProcessTreeBuilder.shared.buildTree()
-            session.isInTerminalMultiplexer = ProcessTreeBuilder.shared.isInTerminalMultiplexer(pid: pid, tree: tree)
-        }
-        if let tty = event.tty {
-            session.tty = tty.replacingOccurrences(of: "/dev/", with: "")
-        }
-        session.lastActivity = Date()
-        applyHookConversationInfo(event: event, session: &session)
+        session.lastUnifiedEvent = event
+        session.lastActivity = event.timestamp
 
-        if event.isSessionEnded {
+        if let sessionContext = event.payload.session {
+            let existingTree = ProcessTreeBuilder.shared.buildTree()
+
+            if let transcriptPath = sessionContext.transcriptPath, !transcriptPath.isEmpty {
+                session.transcriptPath = transcriptPath
+            }
+            if let pid = sessionContext.pid {
+                session.pid = pid
+                session.detectedTerminalBackend = TerminalMultiplexerRegistry.shared.detectedBackend(
+                    pid: pid,
+                    tree: existingTree
+                )
+            }
+            if let tty = sessionContext.tty, !tty.isEmpty {
+                session.tty = tty.replacingOccurrences(of: "/dev/", with: "")
+            }
+
+            if let resolvedBackend = await TerminalMultiplexerRegistry.shared.resolvedBackend(
+                pid: session.pid,
+                tty: session.tty,
+                preferred: TerminalMultiplexerRegistry.fallbackBackend,
+                tree: existingTree
+            ) {
+                session.detectedTerminalBackend = resolvedBackend
+                session.isInTerminalMultiplexer = true
+            } else {
+                session.isInTerminalMultiplexer = false
+            }
+        }
+
+        applyUnifiedConversationInfo(event: event, session: &session)
+        ToolEventProcessor.processUnifiedToolEvent(event: event, session: &session)
+        ToolEventProcessor.processUnifiedSubagentEvent(event: event, session: &session)
+
+        if event.kind == .sessionEnded {
+            session.phaseSources.set(nil, for: .transcript)
+            applyPhaseUpdate(to: &session, source: .runtime, phase: .ended)
+
             if await shouldRetainEndedSession(session) {
+                AppDiagnosticsLogger.log(.info, category: .session, "Retaining ended session=\(sessionId)")
+                session.phaseSources.set(nil, for: .runtime)
                 applyPhaseUpdate(
                     to: &session,
-                    source: .hook,
+                    source: .runtime,
                     phase: AgentInteractionRegistry.shared.canSendMessages(for: session) ? .waitingForInput : .idle
                 )
                 sessions[sessionId] = session
             } else {
+                AppDiagnosticsLogger.log(.info, category: .session, "Removing ended session=\(sessionId)")
                 sessions.removeValue(forKey: sessionId)
                 cancelPendingSync(sessionId: sessionId)
             }
             return
         }
 
-        let newPhase = event.determinePhase()
-        applyPhaseUpdate(to: &session, source: .hook, phase: newPhase)
-
-        processToolTracking(event: event, session: &session)
-        processSubagentTracking(event: event, session: &session)
-
-        if event.shouldAwaitPermissionResponse, let toolUseId = event.toolUseId {
-            Self.logger.debug("Setting tool \(toolUseId.prefix(12), privacy: .public) status to waitingForApproval")
-            ToolEventProcessor.updateToolStatus(in: &session, toolId: toolUseId, status: .waitingForApproval)
-        }
-
-        if case .stop = event.domainEvent {
+        if event.shouldResetSubagentState {
             session.subagentState = SubagentState()
         }
 
-        sessions[sessionId] = session
-        publishState()
-
-        if event.shouldSyncFile {
-            scheduleFileSync(sessionId: sessionId, cwd: event.cwd)
+        if let mappedPhase = mappedPhase(for: event, currentPhase: session.phase) {
+            if case .ended = mappedPhase {
+                session.phaseSources.set(nil, for: .transcript)
+            }
+            applyPhaseUpdate(to: &session, source: .runtime, phase: mappedPhase)
         }
 
-        if shouldHydrateConversationInfo(for: session, isNewSession: isNewSession) {
-            scheduleConversationHydration(sessionId: sessionId, cwd: event.cwd)
+        sessions[sessionId] = session
+
+        if let cwd = event.payload.session?.cwd,
+           shouldHydrateConversationInfo(for: session, isNewSession: isNewSession) {
+            scheduleConversationHydration(sessionId: sessionId, cwd: cwd)
+        }
+
+        let syncCwd = event.payload.session?.cwd ?? (session.cwd.isEmpty ? nil : session.cwd)
+        if event.shouldSyncTranscript, let cwd = syncCwd {
+            scheduleFileSync(sessionId: sessionId, cwd: cwd)
         }
     }
 
-    private func createSession(from event: HookEvent) -> SessionState {
-        let phase = event.determinePhase()
+    private func createSession(from event: UnifiedAgentEvent) -> SessionState {
+        let cwd = event.payload.session?.cwd ?? ""
+        let phase = mappedPhase(for: event, currentPhase: .idle) ?? .idle
+
         return SessionState(
             sessionId: event.sessionId,
-            agentType: event.agentType,
-            cwd: event.cwd,
-            transcriptPath: event.transcriptPath,
-            projectName: URL(fileURLWithPath: event.cwd).lastPathComponent,
-            pid: event.pid,
-            tty: event.tty?.replacingOccurrences(of: "/dev/", with: ""),
-            isInTerminalMultiplexer: false,  // Will be updated
+            agentType: event.provider,
+            cwd: cwd,
+            transcriptPath: event.payload.session?.transcriptPath,
+            projectName: cwd.isEmpty ? event.provider.rawValue.capitalized : URL(fileURLWithPath: cwd).lastPathComponent,
+            pid: event.payload.session?.pid,
+            tty: event.payload.session?.tty?.replacingOccurrences(of: "/dev/", with: ""),
+            isInTerminalMultiplexer: false,
             phase: phase,
-            phaseSources: SessionPhaseSources(hook: phase, transcript: nil, runtime: nil)
+            phaseSources: SessionPhaseSources(transcript: nil, runtime: phase),
+            lastUnifiedEvent: event,
+            lastActivity: event.timestamp,
+            createdAt: event.timestamp
         )
     }
 
-    private func shouldRetainEndedSession(_ session: SessionState) async -> Bool {
-        if session.isInTerminalMultiplexer, let tty = session.tty {
-            let adapter = TerminalMultiplexerRegistry.shared.adapter(for: AppSettings.terminalBackend)
-            if await adapter.hasTarget(forTTY: tty) {
-                return true
-            }
-        }
-
-        guard let tty = session.tty else {
-            return false
-        }
-
-        let tree = ProcessTreeBuilder.shared.buildTree()
-        return ProcessTreeBuilder.shared.hasProcesses(onTTY: tty, tree: tree)
+    private func mappedPhase(for event: UnifiedAgentEvent, currentPhase: SessionPhase) -> SessionPhase? {
+        event.mappedSessionPhase(currentPhase: currentPhase)
     }
 
-    private func applyHookConversationInfo(event: HookEvent, session: inout SessionState) {
-        guard let message = event.message?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !message.isEmpty else {
-            return
-        }
+    private func applyUnifiedConversationInfo(event: UnifiedAgentEvent, session: inout SessionState) {
+        let trimmedMessage = event.payload.message?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let message = trimmedMessage, !message.isEmpty else { return }
 
         var info = session.conversationInfo
 
-        switch event.domainEvent {
-        case .userPromptSubmit:
+        switch event.kind {
+        case .turnInputSubmitted:
             if info.firstUserMessage == nil {
                 info = ConversationInfo(
                     summary: info.summary,
@@ -242,7 +268,7 @@ actor SessionStore {
                     lastMessageRole: "user",
                     lastToolName: info.lastToolName,
                     firstUserMessage: message,
-                    lastUserMessageDate: Date()
+                    lastUserMessageDate: event.timestamp
                 )
             } else {
                 info = ConversationInfo(
@@ -251,10 +277,10 @@ actor SessionStore {
                     lastMessageRole: "user",
                     lastToolName: info.lastToolName,
                     firstUserMessage: info.firstUserMessage,
-                    lastUserMessageDate: Date()
+                    lastUserMessageDate: event.timestamp
                 )
             }
-        case .stop, .notification(_):
+        case .notification, .agentIdle, .turnCompleted:
             info = ConversationInfo(
                 summary: info.summary,
                 lastMessage: message,
@@ -270,46 +296,30 @@ actor SessionStore {
         session.conversationInfo = info
     }
 
-    private func processToolTracking(event: HookEvent, session: inout SessionState) {
-        switch event.domainEvent {
-        case .preToolUse:
-            if let toolName = event.tool,
-               session.subagentState.hasActiveSubagent,
-               toolName != "Task" {
-                return
+    private func shouldRetainEndedSession(_ session: SessionState) async -> Bool {
+        if session.isInTerminalMultiplexer, let tty = session.tty {
+            let backend: TerminalBackend
+            if let detected = session.detectedTerminalBackend {
+                backend = detected
+            } else {
+                backend = await TerminalMultiplexerRegistry.shared.resolvedBackend(
+                    pid: session.pid,
+                    tty: tty,
+                    preferred: TerminalMultiplexerRegistry.fallbackBackend
+                ) ?? TerminalMultiplexerRegistry.fallbackBackend
             }
-            ToolEventProcessor.processPreToolUse(event: event, session: &session)
-
-        case .postToolUse:
-            ToolEventProcessor.processPostToolUse(event: event, session: &session)
-
-        default:
-            break
+            let adapter = await TerminalMultiplexerRegistry.shared.adapter(for: backend)
+            if await adapter.hasTarget(forTTY: tty) {
+                return true
+            }
         }
-    }
 
-    private func processSubagentTracking(event: HookEvent, session: inout SessionState) {
-        switch event.domainEvent {
-        case .preToolUse:
-            if event.tool == "Task", let toolUseId = event.toolUseId {
-                let description = event.toolInput?["description"]?.value as? String
-                session.subagentState.startTask(taskToolId: toolUseId, description: description)
-                Self.logger.debug("Started Task subagent tracking: \(toolUseId.prefix(12), privacy: .public)")
-            }
-
-        case .postToolUse:
-            if event.tool == "Task" {
-                Self.logger.debug("PostToolUse for Task received (subagent still running)")
-            }
-
-        case .subagentStop:
-            // SubagentStop fires when a subagent completes - stop tracking
-            // Subagent tools are populated from agent file in processFileUpdated
-            Self.logger.debug("SubagentStop received")
-
-        default:
-            break
+        guard let tty = session.tty else {
+            return false
         }
+
+        let tree = ProcessTreeBuilder.shared.buildTree()
+        return ProcessTreeBuilder.shared.hasProcesses(onTTY: tty, tree: tree)
     }
 
     // MARK: - Subagent Event Handlers
@@ -318,6 +328,7 @@ actor SessionStore {
     private func processSubagentStarted(sessionId: String, taskToolId: String) {
         guard var session = sessions[sessionId] else { return }
         session.subagentState.startTask(taskToolId: taskToolId)
+        applyPhaseUpdate(to: &session, source: .runtime, phase: .processing)
         sessions[sessionId] = session
     }
 
@@ -325,6 +336,7 @@ actor SessionStore {
     private func processSubagentToolExecuted(sessionId: String, tool: SubagentToolCall) {
         guard var session = sessions[sessionId] else { return }
         session.subagentState.addSubagentTool(tool)
+        applyPhaseUpdate(to: &session, source: .runtime, phase: .processing)
         sessions[sessionId] = session
     }
 
@@ -332,6 +344,15 @@ actor SessionStore {
     private func processSubagentToolCompleted(sessionId: String, toolId: String, status: ToolStatus) {
         guard var session = sessions[sessionId] else { return }
         session.subagentState.updateSubagentToolStatus(toolId: toolId, status: status)
+        let hasWaitingApprovalPhase: Bool
+        if case .waitingForApproval = session.phase {
+            hasWaitingApprovalPhase = true
+        } else {
+            hasWaitingApprovalPhase = false
+        }
+        if !session.subagentState.hasActiveSubagent && !hasWaitingApprovalPhase {
+            applyPhaseUpdate(to: &session, source: .runtime, phase: .waitingForInput)
+        }
         sessions[sessionId] = session
     }
 
@@ -339,6 +360,15 @@ actor SessionStore {
     private func processSubagentStopped(sessionId: String, taskToolId: String) {
         guard var session = sessions[sessionId] else { return }
         session.subagentState.stopTask(taskToolId: taskToolId)
+        let hasWaitingApprovalPhase: Bool
+        if case .waitingForApproval = session.phase {
+            hasWaitingApprovalPhase = true
+        } else {
+            hasWaitingApprovalPhase = false
+        }
+        if !session.subagentState.hasActiveSubagent && !hasWaitingApprovalPhase {
+            applyPhaseUpdate(to: &session, source: .runtime, phase: .waitingForInput)
+        }
         sessions[sessionId] = session
         // Subagent tools will be populated from agent file in processFileUpdated
     }
@@ -378,16 +408,16 @@ actor SessionStore {
                 mode: nextPending.mode,
                 receivedAt: nextPending.timestamp
             ))
-            applyPhaseUpdate(to: &session, source: .hook, phase: newPhase)
+            applyPhaseUpdate(to: &session, source: .runtime, phase: newPhase)
             Self.logger.debug("Switched to next pending tool: \(nextPending.id.prefix(12), privacy: .public)")
         } else {
             // No more pending tools - transition to processing
             if case .waitingForApproval(let ctx) = session.phase, ctx.toolUseId == toolUseId {
-                applyPhaseUpdate(to: &session, source: .hook, phase: .processing)
+                applyPhaseUpdate(to: &session, source: .runtime, phase: .processing)
             } else if case .waitingForApproval = session.phase {
                 // The approved tool wasn't the one in phase context, but no others pending
                 // This can happen if tools were approved out of order
-                applyPhaseUpdate(to: &session, source: .hook, phase: .processing)
+                applyPhaseUpdate(to: &session, source: .runtime, phase: .processing)
             }
         }
 
@@ -423,13 +453,14 @@ actor SessionStore {
                     mode: nextPending.mode,
                     receivedAt: nextPending.timestamp
                 ))
-                applyPhaseUpdate(to: &session, source: .hook, phase: newPhase)
+                applyPhaseUpdate(to: &session, source: .runtime, phase: newPhase)
                 Self.logger.debug("Switched to next pending tool after completion: \(nextPending.id.prefix(12), privacy: .public)")
             } else {
-                applyPhaseUpdate(to: &session, source: .hook, phase: .processing)
+                applyPhaseUpdate(to: &session, source: .runtime, phase: .processing)
             }
         }
 
+        applyChatHistoryRetention(to: &session)
         sessions[sessionId] = session
     }
 
@@ -449,15 +480,15 @@ actor SessionStore {
                 mode: nextPending.mode,
                 receivedAt: nextPending.timestamp
             ))
-            applyPhaseUpdate(to: &session, source: .hook, phase: newPhase)
+            applyPhaseUpdate(to: &session, source: .runtime, phase: newPhase)
             Self.logger.debug("Switched to next pending tool after denial: \(nextPending.id.prefix(12), privacy: .public)")
         } else {
             // No more pending tools - transition to processing (Claude will handle denial)
             if case .waitingForApproval(let ctx) = session.phase, ctx.toolUseId == toolUseId {
-                applyPhaseUpdate(to: &session, source: .hook, phase: .processing)
+                applyPhaseUpdate(to: &session, source: .runtime, phase: .processing)
             } else if case .waitingForApproval = session.phase {
                 // The denied tool wasn't the one in phase context, but no others pending
-                applyPhaseUpdate(to: &session, source: .hook, phase: .processing)
+                applyPhaseUpdate(to: &session, source: .runtime, phase: .processing)
             }
         }
 
@@ -480,15 +511,15 @@ actor SessionStore {
                 mode: nextPending.mode,
                 receivedAt: nextPending.timestamp
             ))
-            applyPhaseUpdate(to: &session, source: .hook, phase: newPhase)
+            applyPhaseUpdate(to: &session, source: .runtime, phase: newPhase)
             Self.logger.debug("Switched to next pending tool after socket failure: \(nextPending.id.prefix(12), privacy: .public)")
         } else {
             // No more pending tools - clear permission state
             if case .waitingForApproval(let ctx) = session.phase, ctx.toolUseId == toolUseId {
-                applyPhaseUpdate(to: &session, source: .hook, phase: .idle)
+                applyPhaseUpdate(to: &session, source: .runtime, phase: .idle)
             } else if case .waitingForApproval = session.phase {
                 // The failed tool wasn't in phase context, but no others pending
-                applyPhaseUpdate(to: &session, source: .hook, phase: .idle)
+                applyPhaseUpdate(to: &session, source: .runtime, phase: .idle)
             }
         }
 
@@ -554,8 +585,14 @@ actor SessionStore {
                                 session.chatItems[idx] = ChatHistoryItem(
                                     id: tool.id,
                                     type: .toolCall(ToolCallItem(
+                                        agentType: session.agentType,
                                         name: tool.name,
                                         input: tool.input,
+                                        detailLocator: existingTool.detailLocator ?? ToolCallItem.DetailLocator(
+                                            sessionId: session.sessionId,
+                                            cwd: session.cwd,
+                                            toolUseId: tool.id
+                                        ),
                                         status: existingTool.status,
                                         approvalMode: existingTool.approvalMode,
                                         result: existingTool.result,
@@ -570,6 +607,9 @@ actor SessionStore {
                     }
 
                     let item = createChatItem(
+                        sessionId: session.sessionId,
+                        cwd: session.cwd,
+                        agentType: session.agentType,
                         from: block,
                         message: message,
                         blockIndex: blockIndex,
@@ -596,8 +636,14 @@ actor SessionStore {
                                 session.chatItems[idx] = ChatHistoryItem(
                                     id: tool.id,
                                     type: .toolCall(ToolCallItem(
+                                        agentType: session.agentType,
                                         name: tool.name,
                                         input: tool.input,
+                                        detailLocator: existingTool.detailLocator ?? ToolCallItem.DetailLocator(
+                                            sessionId: session.sessionId,
+                                            cwd: session.cwd,
+                                            toolUseId: tool.id
+                                        ),
                                         status: existingTool.status,
                                         approvalMode: existingTool.approvalMode,
                                         result: existingTool.result,
@@ -612,6 +658,9 @@ actor SessionStore {
                     }
 
                     let item = createChatItem(
+                        sessionId: session.sessionId,
+                        cwd: session.cwd,
+                        agentType: session.agentType,
                         from: block,
                         message: message,
                         blockIndex: blockIndex,
@@ -639,6 +688,7 @@ actor SessionStore {
             structuredResults: payload.structuredResults
         )
 
+        applyChatHistoryRetention(to: &session)
         sessions[payload.sessionId] = session
 
         await emitToolCompletionEvents(
@@ -730,6 +780,9 @@ actor SessionStore {
 
     /// Create chat item (checks existingIds to avoid duplicates)
     private func createChatItem(
+        sessionId: String,
+        cwd: String,
+        agentType: AgentPlatform,
         from block: MessageBlock,
         message: ChatMessage,
         blockIndex: Int,
@@ -771,8 +824,14 @@ actor SessionStore {
             return ChatHistoryItem(
                 id: tool.id,
                 type: .toolCall(ToolCallItem(
+                    agentType: agentType,
                     name: tool.name,
                     input: tool.input,
+                    detailLocator: ToolCallItem.DetailLocator(
+                        sessionId: sessionId,
+                        cwd: cwd,
+                        toolUseId: tool.id
+                    ),
                     status: status,
                     approvalMode: nil,
                     result: resultText,
@@ -807,11 +866,14 @@ actor SessionStore {
 
         // Codex/Claude can leave a stale hook/transcript processing phase behind after Esc.
         // Clear active phase sources first so runtime idle can win immediately.
-        session.phaseSources.set(nil, for: .hook)
         session.phaseSources.set(nil, for: .transcript)
 
-        // Transition to idle
-        applyPhaseUpdate(to: &session, source: .runtime, phase: .idle)
+        // Transition out of processing immediately. If we can still message the agent,
+        // treat interrupt as returning to ready-for-input rather than fully idle.
+        let nextPhase: SessionPhase = AgentInteractionRegistry.shared.canSendMessages(for: session)
+            ? .waitingForInput
+            : .idle
+        applyPhaseUpdate(to: &session, source: .runtime, phase: nextPhase)
 
         sessions[sessionId] = session
 
@@ -894,6 +956,9 @@ actor SessionStore {
         for message in messages {
             for (blockIndex, block) in message.content.enumerated() {
                 let item = createChatItem(
+                    sessionId: session.sessionId,
+                    cwd: session.cwd,
+                    agentType: session.agentType,
                     from: block,
                     message: message,
                     blockIndex: blockIndex,
@@ -913,7 +978,39 @@ actor SessionStore {
         // Sort by timestamp
         session.chatItems.sort { $0.timestamp < $1.timestamp }
 
+        applyChatHistoryRetention(to: &session)
         sessions[sessionId] = session
+    }
+
+    private func applyChatHistoryRetention(to session: inout SessionState) {
+        let limit = chatHistoryRetentionLimit
+        guard session.chatItems.count > limit else { return }
+
+        let protectedIds = Set(session.chatItems.compactMap { item -> String? in
+            guard case .toolCall(let tool) = item.type else { return nil }
+            switch tool.status {
+            case .running, .waitingForApproval:
+                return item.id
+            case .success, .error, .interrupted:
+                return nil
+            }
+        })
+
+        let trailingIds = Set(session.chatItems.suffix(limit).map(\.id))
+        let retainedIds = trailingIds.union(protectedIds)
+        guard retainedIds.count < session.chatItems.count else { return }
+
+        session.chatItems = session.chatItems.filter { retainedIds.contains($0.id) }
+        pruneToolTracking(for: &session, retainedToolIds: retainedIds)
+    }
+
+    private func pruneToolTracking(for session: inout SessionState, retainedToolIds: Set<String>) {
+        session.toolTracker.seenIds = session.toolTracker.seenIds.filter {
+            retainedToolIds.contains($0) || session.toolTracker.inProgress[$0] != nil
+        }
+        session.toolTracker.inProgress = session.toolTracker.inProgress.filter {
+            retainedToolIds.contains($0.key)
+        }
     }
 
     // MARK: - File Sync Scheduling
@@ -1056,5 +1153,22 @@ actor SessionStore {
     /// Get all current sessions
     func allSessions() -> [SessionState] {
         Array(sessions.values)
+    }
+
+    func applyChatHistoryRetentionToAllSessions() {
+        var mutated = false
+        for sessionId in sessions.keys {
+            guard var session = sessions[sessionId] else { continue }
+            let originalCount = session.chatItems.count
+            applyChatHistoryRetention(to: &session)
+            if session.chatItems.count != originalCount {
+                sessions[sessionId] = session
+                mutated = true
+            }
+        }
+
+        if mutated {
+            publishState()
+        }
     }
 }

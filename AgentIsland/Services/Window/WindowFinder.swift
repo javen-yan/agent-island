@@ -2,12 +2,13 @@
 //  WindowFinder.swift
 //  Agent Island
 //
-//  Finds windows using yabai window manager
+//  Legacy yabai window lookup helpers retained for future re-integration.
+//  The current product flow does not call into this file.
 //
 
 import Foundation
 
-/// Information about a yabai window
+/// Information about a yabai window.
 struct YabaiWindow: Sendable {
     let id: Int
     let pid: Int
@@ -29,7 +30,7 @@ struct YabaiWindow: Sendable {
     }
 }
 
-/// Finds windows using yabai
+/// Finds windows using yabai.
 actor WindowFinder {
     static let shared = WindowFinder()
 
@@ -38,7 +39,7 @@ actor WindowFinder {
 
     private init() {}
 
-    /// Check if yabai is available (caches result)
+    /// Check if yabai is available (cached).
     func isYabaiAvailable() -> Bool {
         if let cached = isAvailableCache { return cached }
 
@@ -50,17 +51,18 @@ actor WindowFinder {
                 return true
             }
         }
+
         isAvailableCache = false
         return false
     }
 
-    /// Get the yabai path if available
+    /// Get the yabai path if available.
     func getYabaiPath() -> String? {
         _ = isYabaiAvailable()
         return yabaiPath
     }
 
-    /// Get all windows from yabai
+    /// Get all windows from yabai.
     func getAllWindows() async -> [YabaiWindow] {
         guard isYabaiAvailable(), let path = yabaiPath else { return [] }
 
@@ -76,22 +78,18 @@ actor WindowFinder {
         }
     }
 
-    /// Get the current space number
     nonisolated func getCurrentSpace(windows: [YabaiWindow]) -> Int? {
         windows.first(where: { $0.hasFocus })?.space
     }
 
-    /// Find windows for a terminal PID
     nonisolated func findWindows(forTerminalPid pid: Int, windows: [YabaiWindow]) -> [YabaiWindow] {
         windows.filter { $0.pid == pid }
     }
 
-    /// Find tmux window (title contains "tmux")
     nonisolated func findTmuxWindow(forTerminalPid pid: Int, windows: [YabaiWindow]) -> YabaiWindow? {
         windows.first { $0.pid == pid && $0.title.lowercased().contains("tmux") }
     }
 
-    /// Find the primary terminal window when a dedicated tmux title is unavailable
     nonisolated func findPrimaryTerminalWindow(forTerminalPid pid: Int, windows: [YabaiWindow]) -> YabaiWindow? {
         windows.first { $0.pid == pid && !$0.title.contains("✳") }
     }

@@ -30,11 +30,16 @@ struct SessionIncrementalSync: Sendable {
     let phaseHint: SessionPhase?
 }
 
+struct ToolResultDetail: Sendable {
+    let text: String
+}
+
 protocol SessionTranscriptProvider: Sendable {
     var agentType: AgentPlatform { get }
     func loadHistory(for session: SessionState) async -> SessionHistorySnapshot?
     func syncIncremental(for session: SessionState) async -> SessionIncrementalSync?
     func parseSubagentTools(agentId: String, cwd: String) async -> [SubagentToolInfo]
+    func loadToolResultDetail(sessionId: String, cwd: String, toolUseId: String) async -> ToolResultDetail?
 }
 
 struct SessionTranscriptProviderRegistry {
@@ -97,6 +102,14 @@ private struct ClaudeTranscriptProvider: SessionTranscriptProvider {
     func parseSubagentTools(agentId: String, cwd: String) async -> [SubagentToolInfo] {
         await ConversationParser.shared.parseSubagentTools(agentId: agentId, cwd: cwd)
     }
+
+    func loadToolResultDetail(sessionId: String, cwd: String, toolUseId: String) async -> ToolResultDetail? {
+        await ConversationParser.shared.loadToolResultDetail(
+            sessionId: sessionId,
+            cwd: cwd,
+            toolUseId: toolUseId
+        )
+    }
 }
 
 private actor CodexTranscriptProvider: SessionTranscriptProvider {
@@ -120,21 +133,24 @@ private actor CodexTranscriptProvider: SessionTranscriptProvider {
             return nil
         }
 
+        let previewToolResults = parsed.toolResults.mapValues(\.previewVersion)
+        let previewStructuredResults = parsed.structuredResults.mapValues(\.previewVersion)
+
         cache[session.sessionId] = CacheEntry(
             transcriptPath: parsed.transcriptPath,
             messages: parsed.messages,
             conversationInfo: parsed.conversationInfo,
             completedToolIds: parsed.completedToolIds,
-            toolResults: parsed.toolResults,
-            structuredResults: parsed.structuredResults,
+            toolResults: previewToolResults,
+            structuredResults: previewStructuredResults,
             phaseHint: parsed.phaseHint
         )
 
         return SessionHistorySnapshot(
             messages: parsed.messages,
             completedToolIds: parsed.completedToolIds,
-            toolResults: parsed.toolResults,
-            structuredResults: parsed.structuredResults,
+            toolResults: previewToolResults,
+            structuredResults: previewStructuredResults,
             conversationInfo: parsed.conversationInfo,
             phaseHint: parsed.phaseHint
         )
@@ -145,14 +161,17 @@ private actor CodexTranscriptProvider: SessionTranscriptProvider {
             return nil
         }
 
+        let previewToolResults = parsed.toolResults.mapValues(\.previewVersion)
+        let previewStructuredResults = parsed.structuredResults.mapValues(\.previewVersion)
+
         let previous = cache[session.sessionId]
         cache[session.sessionId] = CacheEntry(
             transcriptPath: parsed.transcriptPath,
             messages: parsed.messages,
             conversationInfo: parsed.conversationInfo,
             completedToolIds: parsed.completedToolIds,
-            toolResults: parsed.toolResults,
-            structuredResults: parsed.structuredResults,
+            toolResults: previewToolResults,
+            structuredResults: previewStructuredResults,
             phaseHint: parsed.phaseHint
         )
 
@@ -172,8 +191,8 @@ private actor CodexTranscriptProvider: SessionTranscriptProvider {
         return SessionIncrementalSync(
             newMessages: newMessages,
             completedToolIds: parsed.completedToolIds,
-            toolResults: parsed.toolResults,
-            structuredResults: parsed.structuredResults,
+            toolResults: previewToolResults,
+            structuredResults: previewStructuredResults,
             clearDetected: false,
             conversationInfo: parsed.conversationInfo,
             phaseHint: parsed.phaseHint
@@ -182,6 +201,20 @@ private actor CodexTranscriptProvider: SessionTranscriptProvider {
 
     func parseSubagentTools(agentId: String, cwd: String) async -> [SubagentToolInfo] {
         []
+    }
+
+    func loadToolResultDetail(sessionId: String, cwd: String, toolUseId: String) async -> ToolResultDetail? {
+        let session = SessionState(
+            sessionId: sessionId,
+            agentType: .codex,
+            cwd: cwd
+        )
+        guard let parsed = parseTranscript(for: session),
+              let parserResult = parsed.toolResults[toolUseId] else {
+            return nil
+        }
+
+        return ToolResultDetail(text: Self.renderDetailText(parserResult))
     }
 
     private func parseTranscript(for session: SessionState) -> (
@@ -424,8 +457,15 @@ private actor CodexTranscriptProvider: SessionTranscriptProvider {
                 return nil
             }
 
-            let input = decodeToolArguments(payload["arguments"])
-            let block = MessageBlock.toolUse(ToolUseBlock(id: callId, name: toolName, input: input))
+            let rawInput = decodeToolArguments(payload["arguments"])
+            let normalizedToolCall = normalizedToolCall(name: toolName, input: rawInput)
+            let block = MessageBlock.toolUse(
+                ToolUseBlock(
+                    id: callId,
+                    name: normalizedToolCall.name,
+                    input: normalizedToolCall.input
+                )
+            )
             return ChatMessage(
                 id: "\(timestamp.timeIntervalSince1970)-\(lineIndex)-tool-\(callId)",
                 role: .assistant,
@@ -605,6 +645,28 @@ private actor CodexTranscriptProvider: SessionTranscriptProvider {
         return flattened
     }
 
+    private func normalizedToolCall(name: String, input: [String: String]) -> (name: String, input: [String: String]) {
+        guard name == "exec_command" else {
+            return (name, input)
+        }
+
+        var normalizedInput = input
+        if normalizedInput["command"] == nil,
+           let command = normalizedInput["cmd"],
+           !command.isEmpty {
+            normalizedInput["command"] = command
+        }
+
+        if normalizedInput["description"] == nil,
+           let command = normalizedInput["command"],
+           !command.isEmpty {
+            let firstLine = command.components(separatedBy: .newlines).first ?? command
+            normalizedInput["description"] = String(firstLine.prefix(80))
+        }
+
+        return ("Bash", normalizedInput)
+    }
+
     private func resolveTranscriptPath(for session: SessionState) -> String? {
         if let transcriptPath = session.transcriptPath,
            fileManager.fileExists(atPath: transcriptPath) {
@@ -713,6 +775,33 @@ private actor CodexTranscriptProvider: SessionTranscriptProvider {
         case .system:
             return "system"
         }
+    }
+}
+
+extension ConversationParser.ToolResult {
+    nonisolated var previewVersion: Self {
+        Self(
+            content: content.map { ToolResultPreview.truncate($0, limit: ToolResultPreview.maxTextCharacters) },
+            stdout: stdout.map { ToolResultPreview.truncate($0, limit: ToolResultPreview.maxCodeCharacters) },
+            stderr: stderr.map { ToolResultPreview.truncate($0, limit: ToolResultPreview.maxTextCharacters) },
+            isError: isError
+        )
+    }
+}
+
+private extension CodexTranscriptProvider {
+    static func renderDetailText(_ result: SessionToolResult) -> String {
+        var parts: [String] = []
+        if let stdout = result.stdout, !stdout.isEmpty {
+            parts.append(stdout)
+        }
+        if let stderr = result.stderr, !stderr.isEmpty {
+            parts.append("stderr:\n\(stderr)")
+        }
+        if parts.isEmpty, let content = result.content, !content.isEmpty {
+            parts.append(content)
+        }
+        return parts.joined(separator: "\n\n")
     }
 }
 

@@ -12,50 +12,105 @@ import SwiftUI
 struct ToolResultContent: View {
     let tool: ToolCallItem
 
+    @State private var fullDetailText: String?
+    @State private var isLoadingFullDetail = false
+
     var body: some View {
-        if let structured = tool.structuredResult {
-            switch structured {
-            case .read(let r):
-                ReadResultContent(result: r)
-            case .edit(let r):
-                EditResultContent(result: r, toolInput: tool.input)
-            case .write(let r):
-                WriteResultContent(result: r)
-            case .bash(let r):
-                BashResultContent(result: r)
-            case .grep(let r):
-                GrepResultContent(result: r)
-            case .glob(let r):
-                GlobResultContent(result: r)
-            case .todoWrite(let r):
-                TodoWriteResultContent(result: r)
-            case .task(let r):
-                TaskResultContent(result: r)
-            case .webFetch(let r):
-                WebFetchResultContent(result: r)
-            case .webSearch(let r):
-                WebSearchResultContent(result: r)
-            case .askUserQuestion(let r):
-                AskUserQuestionResultContent(result: r)
-            case .bashOutput(let r):
-                BashOutputResultContent(result: r)
-            case .killShell(let r):
-                KillShellResultContent(result: r)
-            case .exitPlanMode(let r):
-                ExitPlanModeResultContent(result: r)
-            case .mcp(let r):
-                MCPResultContent(result: r)
-            case .generic(let r):
-                GenericResultContent(result: r)
+        VStack(alignment: .leading, spacing: 8) {
+            if let structured = tool.structuredResult {
+                switch structured {
+                case .read(let r):
+                    ReadResultContent(result: r)
+                case .edit(let r):
+                    EditResultContent(result: r, toolInput: tool.input)
+                case .write(let r):
+                    WriteResultContent(result: r)
+                case .bash(let r):
+                    BashResultContent(result: r)
+                case .grep(let r):
+                    GrepResultContent(result: r)
+                case .glob(let r):
+                    GlobResultContent(result: r)
+                case .todoWrite(let r):
+                    TodoWriteResultContent(result: r)
+                case .task(let r):
+                    TaskResultContent(result: r)
+                case .webFetch(let r):
+                    WebFetchResultContent(result: r)
+                case .webSearch(let r):
+                    WebSearchResultContent(result: r)
+                case .askUserQuestion(let r):
+                    AskUserQuestionResultContent(result: r)
+                case .bashOutput(let r):
+                    BashOutputResultContent(result: r)
+                case .killShell(let r):
+                    KillShellResultContent(result: r)
+                case .exitPlanMode(let r):
+                    ExitPlanModeResultContent(result: r)
+                case .mcp(let r):
+                    MCPResultContent(result: r)
+                case .generic(let r):
+                    GenericResultContent(result: r)
+                }
+            } else if tool.name == "Edit" {
+                // Special fallback for Edit - show diff from input params
+                EditInputDiffView(input: tool.input)
+            } else if let result = tool.result {
+                // Fallback to raw text display
+                GenericTextContent(text: result)
+            } else {
+                EmptyView()
             }
-        } else if tool.name == "Edit" {
-            // Special fallback for Edit - show diff from input params
-            EditInputDiffView(input: tool.input)
-        } else if let result = tool.result {
-            // Fallback to raw text display
-            GenericTextContent(text: result)
-        } else {
-            EmptyView()
+
+            if let fullDetailText, !fullDetailText.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Full output")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.white.opacity(0.45))
+                    LazyOutputText(
+                        text: fullDetailText,
+                        previewCharacterLimit: Int.max,
+                        previewLineLimit: Int.max,
+                        color: .white.opacity(0.6)
+                    )
+                }
+            } else if canLoadFullDetail {
+                Button {
+                    Task {
+                        await loadFullDetail()
+                    }
+                } label: {
+                    Text(isLoadingFullDetail ? "Loading full output..." : "Load full output")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(.blue.opacity(0.8))
+                }
+                .buttonStyle(.plain)
+                .disabled(isLoadingFullDetail)
+            }
+        }
+    }
+
+    private var canLoadFullDetail: Bool {
+        tool.detailLocator != nil && tool.status != .running && tool.status != .waitingForApproval
+    }
+
+    @MainActor
+    private func loadFullDetail() async {
+        guard !isLoadingFullDetail,
+              let locator = tool.detailLocator,
+              let provider = SessionTranscriptProviderRegistry.shared.provider(for: tool.agentType) else {
+            return
+        }
+
+        isLoadingFullDetail = true
+        defer { isLoadingFullDetail = false }
+
+        if let detail = await provider.loadToolResultDetail(
+            sessionId: locator.sessionId,
+            cwd: locator.cwd,
+            toolUseId: locator.toolUseId
+        ) {
+            fullDetailText = detail.text
         }
     }
 }
@@ -200,7 +255,12 @@ struct BashResultContent: View {
 
             // Stdout
             if !result.stdout.isEmpty {
-                CodePreview(content: result.stdout, maxLines: 15)
+                LazyOutputText(
+                    text: result.stdout,
+                    previewCharacterLimit: 3000,
+                    previewLineLimit: 15,
+                    color: .white.opacity(0.5)
+                )
             }
 
             // Stderr (shown in red)
@@ -209,10 +269,12 @@ struct BashResultContent: View {
                     Text("stderr:")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.red.opacity(0.7))
-                    Text(result.stderr)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(.red.opacity(0.8))
-                        .lineLimit(10)
+                    LazyOutputText(
+                        text: result.stderr,
+                        previewCharacterLimit: 1800,
+                        previewLineLimit: 10,
+                        color: .red.opacity(0.8)
+                    )
                 }
             }
 
@@ -511,14 +573,21 @@ struct BashOutputResultContent: View {
 
             // Output
             if !result.stdout.isEmpty {
-                CodePreview(content: result.stdout, maxLines: 10)
+                LazyOutputText(
+                    text: result.stdout,
+                    previewCharacterLimit: 2400,
+                    previewLineLimit: 10,
+                    color: .white.opacity(0.5)
+                )
             }
 
             if !result.stderr.isEmpty {
-                Text(result.stderr)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.red.opacity(0.7))
-                    .lineLimit(5)
+                LazyOutputText(
+                    text: result.stderr,
+                    previewCharacterLimit: 1200,
+                    previewLineLimit: 5,
+                    color: .red.opacity(0.7)
+                )
             }
         }
     }
@@ -621,14 +690,70 @@ struct GenericTextContent: View {
     let text: String
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 11, design: .monospaced))
-            .foregroundColor(.white.opacity(0.5))
-            .lineLimit(15)
+        LazyOutputText(
+            text: text,
+            previewCharacterLimit: 1200,
+            previewLineLimit: 12,
+            color: .white.opacity(0.5)
+        )
     }
 }
 
 // MARK: - Helper Views
+
+struct LazyOutputText: View {
+    let text: String
+    let previewCharacterLimit: Int
+    let previewLineLimit: Int
+    let color: Color
+
+    @State private var isExpanded = false
+
+    private var isTruncated: Bool {
+        text.count > previewCharacterLimit
+    }
+
+    private var previewText: String {
+        guard isTruncated else { return text }
+        let endIndex = text.index(text.startIndex, offsetBy: previewCharacterLimit)
+        let remainingCount = text.distance(from: endIndex, to: text.endIndex)
+        return String(text[..<endIndex]) + "\n... (\(remainingCount) more characters)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if isExpanded {
+                ScrollView([.vertical, .horizontal], showsIndicators: true) {
+                    Text(text.isEmpty ? " " : text)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(color)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 220)
+            } else {
+                Text(previewText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(color)
+                    .lineLimit(previewLineLimit)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if isTruncated {
+                Button {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    Text(isExpanded ? "Hide details" : "Load details")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(.blue.opacity(0.8))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
 
 /// File code view with filename header and line numbers (matches Edit tool styling)
 struct FileCodeView: View {
@@ -712,6 +837,16 @@ struct FileCodeView: View {
         let lineNumber: Int
         let isLast: Bool
 
+        private var truncatedLine: String {
+            let maxCharacters = 240
+            guard line.count > maxCharacters else {
+                return line.isEmpty ? " " : line
+            }
+            let endIndex = line.index(line.startIndex, offsetBy: maxCharacters)
+            let remainingCount = line.distance(from: endIndex, to: line.endIndex)
+            return String(line[..<endIndex]) + "... (\(remainingCount) more chars)"
+        }
+
         var body: some View {
             HStack(spacing: 0) {
                 // Line number
@@ -722,7 +857,7 @@ struct FileCodeView: View {
                     .padding(.trailing, 8)
 
                 // Line content
-                Text(line.isEmpty ? " " : line)
+                Text(truncatedLine)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(.white.opacity(0.7))
                     .lineLimit(1)
@@ -740,6 +875,17 @@ struct CodePreview: View {
     let content: String
     let maxLines: Int
 
+    private let maxLineCharacters = 240
+
+    private func previewLine(_ line: String) -> String {
+        guard line.count > maxLineCharacters else {
+            return line.isEmpty ? " " : line
+        }
+        let endIndex = line.index(line.startIndex, offsetBy: maxLineCharacters)
+        let remainingCount = line.distance(from: endIndex, to: line.endIndex)
+        return String(line[..<endIndex]) + "... (\(remainingCount) more chars)"
+    }
+
     var body: some View {
         let lines = content.components(separatedBy: "\n")
         let displayLines = Array(lines.prefix(maxLines))
@@ -747,7 +893,7 @@ struct CodePreview: View {
 
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(displayLines.enumerated()), id: \.offset) { _, line in
-                Text(line.isEmpty ? " " : line)
+                Text(previewLine(line))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(.white.opacity(0.5))
             }

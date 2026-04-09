@@ -58,7 +58,7 @@ struct ProcessTreeBuilder: Sendable {
     nonisolated func isInTerminalMultiplexer(
         pid: Int,
         tree: [Int: ProcessInfo],
-        backend: TerminalBackend = AppSettings.terminalBackend
+        backend: TerminalBackend
     ) -> Bool {
         var current = pid
         var depth = 0

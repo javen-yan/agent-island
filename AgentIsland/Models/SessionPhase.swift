@@ -56,7 +56,6 @@ extension PermissionContext: Equatable {
 }
 
 enum SessionPhaseSource: Sendable {
-    case hook
     case transcript
     case runtime
 }
@@ -185,7 +184,7 @@ enum SessionPhase: Sendable {
         return nil
     }
 
-    var approvalMode: ApprovalMode? {
+    nonisolated var approvalMode: ApprovalMode? {
         if case .waitingForApproval(let ctx) = self {
             return ctx.mode
         }
@@ -194,14 +193,11 @@ enum SessionPhase: Sendable {
 }
 
 struct SessionPhaseSources: Equatable, Sendable {
-    var hook: SessionPhase?
     var transcript: SessionPhase?
     var runtime: SessionPhase?
 
     nonisolated mutating func set(_ phase: SessionPhase?, for source: SessionPhaseSource) {
         switch source {
-        case .hook:
-            hook = phase
         case .transcript:
             transcript = phase
         case .runtime:
@@ -212,7 +208,6 @@ struct SessionPhaseSources: Equatable, Sendable {
     nonisolated func resolved(fallback: SessionPhase) -> SessionPhase {
         let candidates: [(SessionPhaseSource, SessionPhase)] = [
             (.runtime, runtime),
-            (.hook, hook),
             (.transcript, transcript)
         ].compactMap { source, phase in
             guard let phase else { return nil }
@@ -265,8 +260,6 @@ struct SessionPhaseSources: Equatable, Sendable {
     private nonisolated func priority(for source: SessionPhaseSource) -> Int {
         switch source {
         case .runtime:
-            return 3
-        case .hook:
             return 2
         case .transcript:
             return 1

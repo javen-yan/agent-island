@@ -29,6 +29,32 @@ enum ToolResultData: Equatable, Sendable {
     case generic(GenericResult)
 }
 
+enum ToolResultPreview {
+    static let maxTextCharacters = 1200
+    static let maxCodeCharacters = 2400
+    static let maxPatchLines = 10
+
+    static func truncate(_ text: String, limit: Int) -> String {
+        guard text.count > limit else { return text }
+        let endIndex = text.index(text.startIndex, offsetBy: limit)
+        let remaining = text.distance(from: endIndex, to: text.endIndex)
+        return String(text[..<endIndex]) + "\n... (\(remaining) more characters)"
+    }
+
+    static func truncatePatchLines(_ patches: [PatchHunk]?) -> [PatchHunk]? {
+        guard let patches else { return nil }
+        return patches.map { patch in
+            PatchHunk(
+                oldStart: patch.oldStart,
+                oldLines: patch.oldLines,
+                newStart: patch.newStart,
+                newLines: patch.newLines,
+                lines: Array(patch.lines.prefix(maxPatchLines))
+            )
+        }
+    }
+}
+
 // MARK: - Read Tool Result
 
 struct ReadResult: Equatable, Sendable {
@@ -254,6 +280,114 @@ struct GenericResult: Equatable, @unchecked Sendable {
 
     static func == (lhs: GenericResult, rhs: GenericResult) -> Bool {
         lhs.rawContent == rhs.rawContent
+    }
+}
+
+extension ToolResultData {
+    nonisolated var previewVersion: ToolResultData {
+        switch self {
+        case .read(let result):
+            return .read(ReadResult(
+                filePath: result.filePath,
+                content: ToolResultPreview.truncate(result.content, limit: ToolResultPreview.maxCodeCharacters),
+                numLines: result.numLines,
+                startLine: result.startLine,
+                totalLines: result.totalLines
+            ))
+        case .edit(let result):
+            return .edit(EditResult(
+                filePath: result.filePath,
+                oldString: ToolResultPreview.truncate(result.oldString, limit: ToolResultPreview.maxCodeCharacters),
+                newString: ToolResultPreview.truncate(result.newString, limit: ToolResultPreview.maxCodeCharacters),
+                replaceAll: result.replaceAll,
+                userModified: result.userModified,
+                structuredPatch: ToolResultPreview.truncatePatchLines(result.structuredPatch)
+            ))
+        case .write(let result):
+            return .write(WriteResult(
+                type: result.type,
+                filePath: result.filePath,
+                content: ToolResultPreview.truncate(result.content, limit: ToolResultPreview.maxCodeCharacters),
+                structuredPatch: ToolResultPreview.truncatePatchLines(result.structuredPatch)
+            ))
+        case .bash(let result):
+            return .bash(BashResult(
+                stdout: ToolResultPreview.truncate(result.stdout, limit: ToolResultPreview.maxCodeCharacters),
+                stderr: ToolResultPreview.truncate(result.stderr, limit: ToolResultPreview.maxTextCharacters),
+                interrupted: result.interrupted,
+                isImage: result.isImage,
+                returnCodeInterpretation: result.returnCodeInterpretation,
+                backgroundTaskId: result.backgroundTaskId
+            ))
+        case .grep(let result):
+            return .grep(GrepResult(
+                mode: result.mode,
+                filenames: result.filenames,
+                numFiles: result.numFiles,
+                content: result.content.map { ToolResultPreview.truncate($0, limit: ToolResultPreview.maxCodeCharacters) },
+                numLines: result.numLines,
+                appliedLimit: result.appliedLimit
+            ))
+        case .glob:
+            return self
+        case .todoWrite:
+            return self
+        case .task(let result):
+            return .task(TaskResult(
+                agentId: result.agentId,
+                status: result.status,
+                content: ToolResultPreview.truncate(result.content, limit: ToolResultPreview.maxTextCharacters),
+                prompt: result.prompt.map { ToolResultPreview.truncate($0, limit: ToolResultPreview.maxTextCharacters) },
+                totalDurationMs: result.totalDurationMs,
+                totalTokens: result.totalTokens,
+                totalToolUseCount: result.totalToolUseCount
+            ))
+        case .webFetch(let result):
+            return .webFetch(WebFetchResult(
+                url: result.url,
+                code: result.code,
+                codeText: result.codeText,
+                bytes: result.bytes,
+                durationMs: result.durationMs,
+                result: ToolResultPreview.truncate(result.result, limit: ToolResultPreview.maxTextCharacters)
+            ))
+        case .webSearch:
+            return self
+        case .askUserQuestion:
+            return self
+        case .bashOutput(let result):
+            return .bashOutput(BashOutputResult(
+                shellId: result.shellId,
+                status: result.status,
+                stdout: ToolResultPreview.truncate(result.stdout, limit: ToolResultPreview.maxCodeCharacters),
+                stderr: ToolResultPreview.truncate(result.stderr, limit: ToolResultPreview.maxTextCharacters),
+                stdoutLines: result.stdoutLines,
+                stderrLines: result.stderrLines,
+                exitCode: result.exitCode,
+                command: result.command.map { ToolResultPreview.truncate($0, limit: ToolResultPreview.maxTextCharacters) },
+                timestamp: result.timestamp
+            ))
+        case .killShell:
+            return self
+        case .exitPlanMode(let result):
+            return .exitPlanMode(ExitPlanModeResult(
+                filePath: result.filePath,
+                plan: result.plan.map { ToolResultPreview.truncate($0, limit: ToolResultPreview.maxTextCharacters) },
+                isAgent: result.isAgent
+            ))
+        case .mcp(let result):
+            let previewResult = result.rawResult.mapValues { value in
+                String(describing: value).count > ToolResultPreview.maxTextCharacters
+                    ? ToolResultPreview.truncate(String(describing: value), limit: ToolResultPreview.maxTextCharacters)
+                    : value
+            }
+            return .mcp(MCPResult(serverName: result.serverName, toolName: result.toolName, rawResult: previewResult))
+        case .generic(let result):
+            return .generic(GenericResult(
+                rawContent: result.rawContent.map { ToolResultPreview.truncate($0, limit: ToolResultPreview.maxTextCharacters) },
+                rawData: result.rawData
+            ))
+        }
     }
 }
 

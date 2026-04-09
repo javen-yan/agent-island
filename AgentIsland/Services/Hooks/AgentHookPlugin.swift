@@ -8,15 +8,6 @@
 import Foundation
 import CryptoKit
 
-private let defaultCodexDangerousCommandPatterns: [String] = [
-    #"(^|\s)(sudo|su)\b"#,
-    #"(^|\s)(rm|mv|cp)\s+.*(/|~)"#,
-    #"(^|\s)(chmod|chown|chgrp)\b"#,
-    #"(^|\s)(kill|pkill|killall|launchctl)\b"#,
-    #"(^|\s)(shutdown|reboot|halt)\b"#,
-    #"(^|\s)(dd|mkfs|diskutil)\b"#
-]
-
 protocol AgentHookPlugin {
     var agentType: AgentPlatform { get }
     var capabilities: AgentHookCapabilities { get }
@@ -94,8 +85,12 @@ struct AgentHookCapabilities: Sendable {
             responseMode: responseMode,
             approvalTools: approvalTools,
             approvalCommandPatterns: approvalCommandPatterns,
+            builtInApprovalCommandPatterns: nil,
+            customApprovalCommandPatterns: nil,
             autoApproveTools: [],
-            autoApproveCommandPatterns: []
+            autoApproveCommandPatterns: [],
+            bridgeLogEnabled: AppSettings.bridgeLogEnabled,
+            bridgeLogLevel: AppSettings.bridgeLogLevel.rawValue
         )
     }
 }
@@ -105,8 +100,12 @@ struct AgentBridgeProfile: Codable {
     let responseMode: String
     let approvalTools: [String]
     let approvalCommandPatterns: [String]
+    let builtInApprovalCommandPatterns: [String]?
+    let customApprovalCommandPatterns: [String]?
     let autoApproveTools: [String]
     let autoApproveCommandPatterns: [String]
+    let bridgeLogEnabled: Bool
+    let bridgeLogLevel: String
 }
 
 struct HookPluginContext {
@@ -120,15 +119,15 @@ struct HookPluginContext {
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
         self.homeDirectory = fileManager.homeDirectoryForCurrentUser
-        self.installRoot = homeDirectory.appendingPathComponent(".agent-island")
-        self.sharedHooksDir = installRoot.appendingPathComponent("hooks")
-        self.bridgeProfilesDir = installRoot.appendingPathComponent("bridge-profiles")
+        self.installRoot = AppPathResolver.runtimeRoot
+        self.sharedHooksDir = AppPathResolver.hooksDirectory
+        self.bridgeProfilesDir = AppPathResolver.bridgeProfilesDirectory
         self.sharedBridgeName = "agent-island-bridge"
+        try? AppPathResolver.migrateLegacyRuntimeIfNeeded(fileManager: fileManager)
     }
 
     func bridgeCommand(for agent: AgentPlatform) -> String {
-        let logPath = installRoot.appendingPathComponent("bridge-debug.log").path
-        return "AGENT_ISLAND_BRIDGE_LOG=\"\(logPath)\" \"\(sharedHooksDir.appendingPathComponent(sharedBridgeName).path)\" --source \(agent.rawValue)"
+        "\"\(sharedHooksDir.appendingPathComponent(sharedBridgeName).path)\" --source \(agent.rawValue)"
     }
 
     private func preferredResourceBridgeURL() -> URL? {
@@ -192,6 +191,7 @@ struct HookPluginContext {
         let targetPath = bridgeURL.standardizedFileURL.path
         print("Agent bridge source: \(sourcePath)")
         print("Agent bridge target: \(targetPath)")
+        AppDiagnosticsLogger.log(.debug, category: .plugins, "Preparing shared bridge source=\(sourcePath) target=\(targetPath)")
 
         let sourceHash = bridgeBinaryHash(at: rustBridge)
         let targetHash = bridgeBinaryHash(at: bridgeURL)
@@ -212,12 +212,14 @@ struct HookPluginContext {
             } else {
                 print("Agent bridge copied to: \(targetPath)")
             }
+            AppDiagnosticsLogger.log(.info, category: .plugins, "Copied shared bridge to \(targetPath)")
         } else {
             if let targetHash {
                 print("Agent bridge unchanged at target path: \(targetPath) sha256=\(targetHash)")
             } else {
                 print("Agent bridge unchanged at target path: \(targetPath)")
             }
+            AppDiagnosticsLogger.log(.debug, category: .plugins, "Shared bridge unchanged at \(targetPath)")
         }
 
         do {
@@ -386,14 +388,24 @@ struct HookPluginContext {
         guard let baseProfile = plugin.capabilities.bridgeProfile else { return }
         let autoApproveCommandPatterns = derivedAutoApproveCommandPatterns(for: plugin.agentType, rules: rules)
         let approvalCommandPatterns = derivedApprovalCommandPatterns(for: plugin.agentType, basePatterns: baseProfile.approvalCommandPatterns)
+        let builtInApprovalCommandPatterns = plugin.agentType == .codex
+            ? AppSettings.codexBuiltInDangerousCommandPatterns
+            : nil
+        let customApprovalCommandPatterns = plugin.agentType == .codex
+            ? AppSettings.codexDangerousCommandPatterns
+            : nil
         try writeBridgeProfile(
             AgentBridgeProfile(
                 agentType: plugin.agentType.rawValue,
                 responseMode: baseProfile.responseMode,
                 approvalTools: baseProfile.approvalTools,
                 approvalCommandPatterns: approvalCommandPatterns,
+                builtInApprovalCommandPatterns: builtInApprovalCommandPatterns,
+                customApprovalCommandPatterns: customApprovalCommandPatterns,
                 autoApproveTools: [],
-                autoApproveCommandPatterns: autoApproveCommandPatterns
+                autoApproveCommandPatterns: autoApproveCommandPatterns,
+                bridgeLogEnabled: AppSettings.bridgeLogEnabled,
+                bridgeLogLevel: AppSettings.bridgeLogLevel.rawValue
             ),
             for: plugin.agentType
         )
@@ -402,7 +414,17 @@ struct HookPluginContext {
     private func derivedApprovalCommandPatterns(for agentType: AgentPlatform, basePatterns: [String]) -> [String] {
         switch agentType {
         case .codex:
-            return Array(Set(basePatterns + AppSettings.codexDangerousCommandPatterns)).sorted()
+            return Array(
+                NSOrderedSet(
+                    array: basePatterns
+                        + AppSettings.codexBuiltInDangerousCommandPatterns
+                        + AppSettings.codexDangerousCommandPatterns
+                )
+            ) as? [String] ?? (
+                basePatterns
+                    + AppSettings.codexBuiltInDangerousCommandPatterns
+                    + AppSettings.codexDangerousCommandPatterns
+            )
         case .claude, .gemini:
             return basePatterns
         }
@@ -851,10 +873,10 @@ private struct CodexHookPlugin: AgentHookPlugin {
             HookEventKey.stop
         ],
         approvalTools: [],
-        approvalCommandPatterns: defaultCodexDangerousCommandPatterns,
+        approvalCommandPatterns: [],
         responseMode: "codex",
-        permissionRequestSource: .preToolUse,
-        supportsPermissionDecisions: true,
+        permissionRequestSource: nil,
+        supportsPermissionDecisions: false,
         supportsConversationHistory: true
     )
 
@@ -868,15 +890,10 @@ private struct CodexHookPlugin: AgentHookPlugin {
             command: context.bridgeCommand(for: .codex),
             timeout: 5
         )
-        let permissionHookCommand = context.commandHook(
-            command: context.bridgeCommand(for: .codex),
-            timeout: 300
-        )
-
         return [
             "hooks": [
                 HookEventKey.sessionStart: [context.hookGroup(matcher: "startup|resume", hooks: [standardHookCommand])],
-                HookEventKey.preToolUse: [context.hookGroup(matcher: "Bash", hooks: [permissionHookCommand])],
+                HookEventKey.preToolUse: [context.hookGroup(matcher: "Bash", hooks: [standardHookCommand])],
                 HookEventKey.postToolUse: [context.hookGroup(matcher: "Bash", hooks: [standardHookCommand])],
                 HookEventKey.userPromptSubmit: [context.hookGroup(hooks: [standardHookCommand])],
                 HookEventKey.stop: [context.hookGroup(hooks: [standardHookCommand])]

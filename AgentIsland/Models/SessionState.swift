@@ -26,6 +26,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
     var pid: Int?
     var tty: String?
     var isInTerminalMultiplexer: Bool
+    var detectedTerminalBackend: TerminalBackend?
 
     // MARK: - State Machine
 
@@ -51,6 +52,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
     // MARK: - Conversation Info (from JSONL parsing)
 
     var conversationInfo: ConversationInfo
+    var lastUnifiedEvent: UnifiedAgentEvent?
 
     // MARK: - Clear Reconciliation
 
@@ -78,12 +80,14 @@ struct SessionState: Equatable, Identifiable, Sendable {
         pid: Int? = nil,
         tty: String? = nil,
         isInTerminalMultiplexer: Bool = false,
+        detectedTerminalBackend: TerminalBackend? = nil,
         phase: SessionPhase = .idle,
         phaseSources: SessionPhaseSources? = nil,
         chatItems: [ChatHistoryItem] = [],
         toolTracker: ToolTracker? = nil,
         subagentState: SubagentState? = nil,
         conversationInfo: ConversationInfo? = nil,
+        lastUnifiedEvent: UnifiedAgentEvent? = nil,
         needsClearReconciliation: Bool = false,
         lastActivity: Date? = nil,
         createdAt: Date? = nil
@@ -96,6 +100,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
         self.pid = pid
         self.tty = tty
         self.isInTerminalMultiplexer = isInTerminalMultiplexer
+        self.detectedTerminalBackend = detectedTerminalBackend
         self.phase = phase
         self.phaseSources = phaseSources ?? Self.defaultPhaseSources
         self.chatItems = chatItems
@@ -105,6 +110,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
             summary: nil, lastMessage: nil, lastMessageRole: nil,
             lastToolName: nil, firstUserMessage: nil, lastUserMessageDate: nil
         )
+        self.lastUnifiedEvent = lastUnifiedEvent
         self.needsClearReconciliation = needsClearReconciliation
         self.lastActivity = lastActivity ?? Date()
         self.createdAt = createdAt ?? Date()
@@ -125,12 +131,95 @@ struct SessionState: Equatable, Identifiable, Sendable {
         return nil
     }
 
-    var approvalMode: ApprovalMode? {
+    nonisolated var approvalMode: ApprovalMode? {
         phase.approvalMode
     }
 
-    var usesTerminalApproval: Bool {
+    nonisolated var usesTerminalApproval: Bool {
         approvalMode == .terminal
+    }
+
+    nonisolated var providerCapabilities: ProviderCapabilities {
+        ProviderCapabilities.baseline(for: agentType)
+    }
+
+    nonisolated var approvalCapability: ApprovalCapability {
+        providerCapabilities.approvalCapability(approvalMode: approvalMode)
+    }
+
+    nonisolated var permissionSourceDescription: String {
+        providerCapabilities.permissionSourceDescription(provider: agentType)
+    }
+
+    var unifiedViewKind: UnifiedAgentEvent.Kind {
+        switch phase {
+        case .waitingForApproval:
+            return .permissionRequested
+        case .processing:
+            return .toolStarted
+        case .compacting:
+            return .sessionCompactionRequested
+        case .waitingForInput, .idle:
+            return .agentIdle
+        case .ended:
+            return .sessionEnded
+        }
+    }
+
+    var unifiedStatusColor: String {
+        switch unifiedViewKind {
+        case .permissionRequested:
+            return "approval"
+        case .toolStarted, .sessionCompactionRequested:
+            return "processing"
+        case .agentIdle:
+            return phase == .waitingForInput ? "ready" : "idle"
+        case .sessionEnded:
+            return "idle"
+        default:
+            return "idle"
+        }
+    }
+
+    var unifiedPendingApprovalEvent: UnifiedAgentEvent? {
+        guard let permission = activePermission else { return nil }
+
+        return UnifiedAgentEvent(
+            provider: agentType,
+            sessionId: sessionId,
+            kind: .permissionRequested,
+            payload: .init(
+                session: .init(
+                    cwd: cwd,
+                    transcriptPath: transcriptPath,
+                    pid: pid,
+                    tty: tty
+                ),
+                tool: .init(
+                    callId: permission.toolUseId,
+                    toolName: permission.toolName,
+                    arguments: permission.formattedInput.map { ["display": $0] } ?? [:],
+                    risk: nil
+                ),
+                permission: .init(
+                    requestId: permission.toolUseId,
+                    sourceKind: "tool_call",
+                    providerEvent: nil
+                ),
+                metadata: [
+                    "approvalMode": permission.mode.rawValue,
+                    "permissionSource": permissionSourceDescription
+                ]
+            ),
+            capabilityHints: .init(
+                supportsAllow: providerCapabilities.toolControl.allow,
+                supportsDeny: providerCapabilities.toolControl.deny,
+                supportsAsk: providerCapabilities.supportsAskApproval,
+                supportsArgumentPatch: providerCapabilities.toolControl.rewriteArgs,
+                supportsAdditionalContext: providerCapabilities.sessionControl.injectStartContext,
+                supportsStopTurn: providerCapabilities.sessionControl.stopTurn
+            )
+        )
     }
 
     // MARK: - UI Convenience Properties
@@ -215,6 +304,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
             pid: pid,
             tty: tty,
             isInTerminalMultiplexer: isInTerminalMultiplexer,
+            detectedTerminalBackend: detectedTerminalBackend,
             phase: phase,
             conversationInfo: conversationInfo,
             lastActivity: lastActivity,

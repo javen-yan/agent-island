@@ -2,21 +2,22 @@
 //  YabaiController.swift
 //  Agent Island
 //
-//  High-level yabai window management controller
+//  Legacy yabai window management retained for future re-integration.
+//  The current product flow does not call into this file.
 //
 
 import Foundation
 
-/// Controller for yabai window management
+/// Controller for yabai window management.
 actor YabaiController {
     static let shared = YabaiController()
 
     private init() {}
 
-    // MARK: - Public API
-
-    /// Focus the terminal window for a given agent PID.
-    func focusWindow(forAgentPid agentPid: Int, terminalBackend: TerminalBackend = AppSettings.terminalBackend) async -> Bool {
+    func focusWindow(
+        forAgentPid agentPid: Int,
+        terminalBackend: TerminalBackend = TerminalMultiplexerRegistry.fallbackBackend
+    ) async -> Bool {
         guard await WindowFinder.shared.isYabaiAvailable() else {
             return false
         }
@@ -43,8 +44,10 @@ actor YabaiController {
         }
     }
 
-    /// Focus the terminal window for a given working directory (fallback path).
-    func focusWindow(forWorkingDirectory workingDirectory: String, terminalBackend: TerminalBackend = AppSettings.terminalBackend) async -> Bool {
+    func focusWindow(
+        forWorkingDirectory workingDirectory: String,
+        terminalBackend: TerminalBackend = TerminalMultiplexerRegistry.fallbackBackend
+    ) async -> Bool {
         guard await WindowFinder.shared.isYabaiAvailable() else { return false }
 
         switch terminalBackend {
@@ -69,9 +72,11 @@ actor YabaiController {
         }
     }
 
-    // MARK: - Tmux Helpers
-
-    private func findTerminalPidForTmuxSession(_ session: String, tree: [Int: ProcessInfo], windows: [YabaiWindow]) async -> Int? {
+    private func findTerminalPidForTmuxSession(
+        _ session: String,
+        tree: [Int: ProcessInfo],
+        windows: [YabaiWindow]
+    ) async -> Int? {
         guard let tmuxPath = await TmuxPathFinder.shared.getTmuxPath() else { return nil }
 
         do {
@@ -80,9 +85,9 @@ actor YabaiController {
             ])
 
             let clientPids = output.components(separatedBy: "\n")
-                .compactMap { Int($0.trimmingCharacters(in: CharacterSet.whitespaces)) }
+                .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
 
-            let windowPids = Set(windows.map { $0.pid })
+            let windowPids = Set(windows.map(\.pid))
             for clientPid in clientPids {
                 var currentPid = clientPid
                 while currentPid > 1 {

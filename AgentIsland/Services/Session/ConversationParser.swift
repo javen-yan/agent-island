@@ -21,6 +21,11 @@ struct ConversationInfo: Equatable {
 actor ConversationParser {
     static let shared = ConversationParser()
 
+    private struct FileWindow {
+        let content: String
+        let truncatedAtStart: Bool
+    }
+
     struct FullConversationSnapshot {
         let messages: [ChatMessage]
         let completedToolIds: Set<String>
@@ -93,51 +98,61 @@ actor ConversationParser {
             return cached.info
         }
 
-        guard let data = fileManager.contents(atPath: sessionFile),
-              let content = String(data: data, encoding: .utf8) else {
+        guard let window = readTailWindow(filePath: sessionFile, maxBytes: metadataTailWindowSize) else {
             return ConversationInfo(summary: nil, lastMessage: nil, lastMessageRole: nil, lastToolName: nil, firstUserMessage: nil, lastUserMessageDate: nil)
         }
 
-        let info = parseContent(content)
+        let firstUserMessage = readFirstUserMessage(filePath: sessionFile)
+        let info = parseContent(
+            window.content,
+            truncatedAtStart: window.truncatedAtStart,
+            firstUserMessageHint: firstUserMessage
+        )
         cache[sessionFile] = CachedInfo(modificationDate: modDate, info: info)
 
         return info
     }
 
     /// Parse JSONL content
-    private func parseContent(_ content: String) -> ConversationInfo {
-        let lines = content.components(separatedBy: "\n").filter { !$0.isEmpty }
+    private func parseContent(
+        _ content: String,
+        truncatedAtStart: Bool = false,
+        firstUserMessageHint: String? = nil
+    ) -> ConversationInfo {
+        let lines = sanitizedLines(from: content, truncatedAtStart: truncatedAtStart)
 
         var summary: String?
         var lastMessage: String?
         var lastMessageRole: String?
         var lastToolName: String?
-        var firstUserMessage: String?
+        var firstUserMessage: String? = firstUserMessageHint
         var lastUserMessageDate: Date?
 
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
-        for line in lines {
-            guard
-                let lineData = line.data(using: .utf8),
-                let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
-            else {
-                continue
-            }
+        if firstUserMessage == nil {
+            for line in lines {
+                guard
+                    let lineData = line.data(using: .utf8),
+                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+                else {
+                    continue
+                }
 
-            let type = json["type"] as? String
-            let isMeta = json["isMeta"] as? Bool ?? false
+                let type = json["type"] as? String
+                let isMeta = json["isMeta"] as? Bool ?? false
 
-            if type == "user" && !isMeta,
-               let message = json["message"] as? [String: Any],
-               let msgContent = message["content"] as? String,
-               let cleanedMsgContent = Self.stripConversationMetadata(from: msgContent),
-               !cleanedMsgContent.hasPrefix("<command-name>"),
-               !cleanedMsgContent.hasPrefix("<local-command"),
-               !cleanedMsgContent.hasPrefix("Caveat:") {
-                firstUserMessage = Self.truncateMessage(cleanedMsgContent, maxLength: 50)
-                break
+                if type == "user" && !isMeta,
+                   let message = json["message"] as? [String: Any],
+                   let msgContent = message["content"] as? String,
+                   let cleanedMsgContent = Self.stripConversationMetadata(from: msgContent),
+                   !cleanedMsgContent.hasPrefix("<command-name>"),
+                   !cleanedMsgContent.hasPrefix("<local-command"),
+                   !cleanedMsgContent.hasPrefix("Caveat:") {
+                    firstUserMessage = Self.truncateMessage(cleanedMsgContent, maxLength: 50)
+                    break
+                }
             }
         }
 
@@ -290,8 +305,7 @@ extension ConversationParser {
         let sessionFile = Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
 
         guard FileManager.default.fileExists(atPath: sessionFile),
-              let data = FileManager.default.contents(atPath: sessionFile),
-              let content = String(data: data, encoding: .utf8) else {
+              let window = readTailWindow(filePath: sessionFile, maxBytes: snapshotTailWindowSize) else {
             return FullConversationSnapshot(
                 messages: [],
                 completedToolIds: [],
@@ -315,7 +329,7 @@ extension ConversationParser {
         var toolResults: [String: ToolResult] = [:]
         var structuredResults: [String: ToolResultData] = [:]
 
-        let lines = content.components(separatedBy: "\n")
+        let lines = sanitizedLines(from: window.content, truncatedAtStart: window.truncatedAtStart)
         for line in lines where !line.isEmpty {
             if line.contains("<command-name>/clear</command-name>") {
                 messages = []
@@ -380,18 +394,45 @@ extension ConversationParser {
             messages.append(message)
         }
 
+        let previewToolResults = toolResults.mapValues(\.previewVersion)
+        let previewStructuredResults = structuredResults.mapValues(\.previewVersion)
+
         return FullConversationSnapshot(
             messages: messages,
             completedToolIds: completedToolIds,
-            toolResults: toolResults,
-            structuredResults: structuredResults,
-            conversationInfo: parseContent(content)
+            toolResults: previewToolResults,
+            structuredResults: previewStructuredResults,
+            conversationInfo: parseContent(
+                window.content,
+                truncatedAtStart: window.truncatedAtStart,
+                firstUserMessageHint: readFirstUserMessage(filePath: sessionFile)
+            )
         )
     }
 
     /// Parse full conversation history for chat view (returns ALL messages - use sparingly)
     func parseFullConversation(sessionId: String, cwd: String) -> [ChatMessage] {
         parseFullSnapshot(sessionId: sessionId, cwd: cwd).messages
+    }
+
+    func loadToolResultDetail(sessionId: String, cwd: String, toolUseId: String) async -> ToolResultDetail? {
+        let snapshot = parseFullSnapshot(sessionId: sessionId, cwd: cwd)
+        guard let result = snapshot.toolResults[toolUseId] else {
+            return nil
+        }
+
+        var parts: [String] = []
+        if let stdout = result.stdout, !stdout.isEmpty {
+            parts.append(stdout)
+        }
+        if let stderr = result.stderr, !stderr.isEmpty {
+            parts.append("stderr:\n\(stderr)")
+        }
+        if parts.isEmpty, let content = result.content, !content.isEmpty {
+            parts.append(content)
+        }
+        guard !parts.isEmpty else { return nil }
+        return ToolResultDetail(text: parts.joined(separator: "\n\n"))
     }
 
     /// Result of incremental parsing
@@ -428,8 +469,8 @@ extension ConversationParser {
         return IncrementalParseResult(
             newMessages: newMessages,
             completedToolIds: state.completedToolIds,
-            toolResults: state.toolResults,
-            structuredResults: state.structuredResults,
+            toolResults: state.toolResults.mapValues(\.previewVersion),
+            structuredResults: state.structuredResults.mapValues(\.previewVersion),
             clearDetected: clearDetected
         )
     }
@@ -1083,6 +1124,75 @@ extension ConversationParser {
         }
 
         return tools
+    }
+}
+
+private extension ConversationParser {
+    var metadataTailWindowSize: Int {
+        256 * 1024
+    }
+
+    var snapshotTailWindowSize: Int {
+        max(512 * 1024, min(AppSettings.chatHistoryRetentionLimitSnapshot() * 32 * 1024, 4 * 1024 * 1024))
+    }
+
+    private func readTailWindow(filePath: String, maxBytes: Int) -> FileWindow? {
+        guard let handle = FileHandle(forReadingAtPath: filePath) else { return nil }
+        defer { try? handle.close() }
+
+        do {
+            let fileSize = try handle.seekToEnd()
+            let readSize = min(UInt64(maxBytes), fileSize)
+            let startOffset = fileSize > readSize ? fileSize - readSize : 0
+            try handle.seek(toOffset: startOffset)
+            let data = try handle.read(upToCount: Int(readSize)) ?? Data()
+            guard let content = String(data: data, encoding: .utf8) else { return nil }
+            return FileWindow(content: content, truncatedAtStart: startOffset > 0)
+        } catch {
+            return nil
+        }
+    }
+
+    private func readFirstUserMessage(filePath: String) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: filePath) else { return nil }
+        defer { try? handle.close() }
+
+        do {
+            let data = try handle.read(upToCount: 128 * 1024) ?? Data()
+            guard let content = String(data: data, encoding: .utf8) else { return nil }
+            let lines = sanitizedLines(from: content, truncatedAtStart: false)
+            for line in lines {
+                guard
+                    let lineData = line.data(using: .utf8),
+                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+                else {
+                    continue
+                }
+
+                let type = json["type"] as? String
+                let isMeta = json["isMeta"] as? Bool ?? false
+                if type == "user" && !isMeta,
+                   let message = json["message"] as? [String: Any],
+                   let msgContent = message["content"] as? String,
+                   let cleanedMsgContent = Self.stripConversationMetadata(from: msgContent),
+                   !cleanedMsgContent.hasPrefix("<command-name>"),
+                   !cleanedMsgContent.hasPrefix("<local-command"),
+                   !cleanedMsgContent.hasPrefix("Caveat:") {
+                    return Self.truncateMessage(cleanedMsgContent, maxLength: 50)
+                }
+            }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    private func sanitizedLines(from content: String, truncatedAtStart: Bool) -> [String] {
+        var lines = content.components(separatedBy: "\n")
+        if truncatedAtStart, !lines.isEmpty {
+            lines.removeFirst()
+        }
+        return lines.filter { !$0.isEmpty }
     }
 }
 

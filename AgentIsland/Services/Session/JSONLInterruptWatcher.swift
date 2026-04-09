@@ -57,6 +57,7 @@ class JSONLInterruptWatcher {
         guard FileManager.default.fileExists(atPath: filePath),
               let handle = FileHandle(forReadingAtPath: filePath) else {
             logger.warning("Failed to open file: \(self.filePath, privacy: .public)")
+            AppDiagnosticsLogger.log(.error, category: .session, "Failed to open interrupt watch file path=\(self.filePath)")
             return
         }
 
@@ -66,6 +67,7 @@ class JSONLInterruptWatcher {
             lastOffset = try handle.seekToEnd()
         } catch {
             logger.error("Failed to seek to end: \(error.localizedDescription, privacy: .public)")
+            AppDiagnosticsLogger.log(.error, category: .session, "Failed to seek interrupt watch file path=\(self.filePath) error=\(error.localizedDescription)")
             return
         }
 
@@ -89,6 +91,7 @@ class JSONLInterruptWatcher {
         newSource.resume()
 
         logger.debug("Started watching: \(self.sessionId.prefix(8), privacy: .public)...")
+        AppDiagnosticsLogger.log(.debug, category: .session, "Started Claude interrupt watcher session=\(self.sessionId)")
     }
 
     private func checkForInterrupt() {
@@ -120,6 +123,7 @@ class JSONLInterruptWatcher {
         for line in lines where !line.isEmpty {
             if isInterruptLine(line) {
                 logger.info("Detected interrupt in session: \(self.sessionId.prefix(8), privacy: .public)")
+                AppDiagnosticsLogger.log(.info, category: .session, "Detected Claude interrupt session=\(self.sessionId)")
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
                     self.delegate?.didDetectInterrupt(sessionId: self.sessionId)
@@ -162,6 +166,7 @@ class JSONLInterruptWatcher {
     private func stopInternal() {
         if source != nil {
             logger.debug("Stopped watching: \(self.sessionId.prefix(8), privacy: .public)...")
+            AppDiagnosticsLogger.log(.debug, category: .session, "Stopped Claude interrupt watcher session=\(self.sessionId)")
         }
         source?.cancel()
         source = nil

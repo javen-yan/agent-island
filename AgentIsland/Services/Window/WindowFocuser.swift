@@ -2,18 +2,18 @@
 //  WindowFocuser.swift
 //  Agent Island
 //
-//  Focuses windows using yabai
+//  Legacy yabai focus helpers retained for future re-integration.
+//  The current product flow does not call into this file.
 //
 
 import Foundation
 
-/// Focuses windows using yabai
+/// Focuses windows using yabai.
 actor WindowFocuser {
     static let shared = WindowFocuser()
 
     private init() {}
 
-    /// Focus a window by ID
     func focusWindow(id: Int) async -> Bool {
         guard let yabaiPath = await WindowFinder.shared.getYabaiPath() else { return false }
 
@@ -27,14 +27,11 @@ actor WindowFocuser {
         }
     }
 
-    /// Focus the tmux window for a terminal
     func focusTmuxWindow(terminalPid: Int, windows: [YabaiWindow]) async -> Bool {
-        // Try to find actual tmux window
         if let tmuxWindow = WindowFinder.shared.findTmuxWindow(forTerminalPid: terminalPid, windows: windows) {
             return await focusWindow(id: tmuxWindow.id)
         }
 
-        // Fall back to the primary terminal window when no tmux title is available
         if let window = WindowFinder.shared.findPrimaryTerminalWindow(forTerminalPid: terminalPid, windows: windows) {
             return await focusWindow(id: window.id)
         }

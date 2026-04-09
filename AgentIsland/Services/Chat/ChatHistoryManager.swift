@@ -5,6 +5,7 @@
 
 import Combine
 import Foundation
+import SwiftUI
 
 @MainActor
 class ChatHistoryManager: ObservableObject {
@@ -121,8 +122,16 @@ enum ChatHistoryItemType: Equatable, Sendable {
 }
 
 struct ToolCallItem: Equatable, Sendable {
+    struct DetailLocator: Equatable, Sendable {
+        let sessionId: String
+        let cwd: String
+        let toolUseId: String
+    }
+
+    let agentType: AgentPlatform
     let name: String
     let input: [String: String]
+    let detailLocator: DetailLocator?
     var status: ToolStatus
     var approvalMode: ApprovalMode?
     var result: String?
@@ -173,10 +182,41 @@ struct ToolCallItem: Equatable, Sendable {
         return ToolStatusDisplay.completed(for: name, result: structuredResult)
     }
 
+    var unifiedKind: UnifiedAgentEvent.Kind {
+        switch status {
+        case .running:
+            return .toolStarted
+        case .waitingForApproval:
+            return .permissionRequested
+        case .success:
+            return .toolCompleted
+        case .error, .interrupted:
+            return .toolFailed
+        }
+    }
+
+    var unifiedStatusText: String {
+        switch unifiedKind {
+        case .permissionRequested:
+            return approvalMode == .terminal
+                ? "Waiting for confirmation in Terminal..."
+                : "Waiting for approval..."
+        case .toolStarted:
+            return ToolStatusDisplay.running(for: name, input: input).text
+        case .toolFailed:
+            return status == .interrupted ? "Interrupted" : "Failed"
+        case .toolCompleted:
+            return ToolStatusDisplay.completed(for: name, result: structuredResult).text
+        default:
+            return statusDisplay.text
+        }
+    }
+
     // Custom Equatable implementation to handle structuredResult
     static func == (lhs: ToolCallItem, rhs: ToolCallItem) -> Bool {
         lhs.name == rhs.name &&
         lhs.input == rhs.input &&
+        lhs.detailLocator == rhs.detailLocator &&
         lhs.status == rhs.status &&
         lhs.approvalMode == rhs.approvalMode &&
         lhs.result == rhs.result &&
@@ -276,6 +316,32 @@ struct SubagentToolCall: Equatable, Identifiable, Sendable {
             return "Searching web..."
         default:
             return name
+        }
+    }
+
+    var unifiedKind: UnifiedAgentEvent.Kind {
+        switch status {
+        case .running:
+            return .agentSubtaskStarted
+        case .waitingForApproval:
+            return .permissionRequested
+        case .success:
+            return .agentSubtaskCompleted
+        case .error, .interrupted:
+            return .toolFailed
+        }
+    }
+
+    var unifiedStatusColor: Color {
+        switch unifiedKind {
+        case .agentSubtaskStarted, .permissionRequested:
+            return .orange
+        case .agentSubtaskCompleted:
+            return .green
+        case .toolFailed:
+            return .red
+        default:
+            return .white.opacity(0.5)
         }
     }
 }

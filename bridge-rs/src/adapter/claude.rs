@@ -3,8 +3,11 @@ use std::process::Command;
 
 use serde_json::{json, Value};
 
+use crate::protocol::PermissionDecision;
+
 use super::{
     default_extra_payload, first_string, normalize_input_with_options, BridgeCapabilities,
+    log_unsupported_action_fields,
     NormalizedInput, NormalizedInputOptions, PermissionCapability, ProcessInfo, SourceAdapter,
     HOOK_EVENT_NOTIFICATION, HOOK_EVENT_PERMISSION_REQUEST, HOOK_EVENT_POST_TOOL_USE,
     HOOK_EVENT_PRE_COMPACT, HOOK_EVENT_PRE_TOOL_USE, HOOK_EVENT_SESSION_END,
@@ -165,13 +168,23 @@ impl SourceAdapter for ClaudeAdapter {
         extra
     }
 
-    fn permission_response(
-        &self,
-        decision: Option<&str>,
-        reason: Option<&str>,
-        _hook_event: &str,
-    ) -> Option<Value> {
-        match decision {
+    fn permission_response(&self, response: &PermissionDecision, hook_event: &str) -> Option<Value> {
+        let mut unsupported = Vec::new();
+        if response.should_continue.is_some() {
+            unsupported.push("continue");
+        }
+        if response.stop_reason.is_some() {
+            unsupported.push("stop_reason");
+        }
+        if response.has_patch() {
+            unsupported.push("patch");
+        }
+        if response.message.is_some() && response.decision.as_deref() != Some("deny") {
+            unsupported.push("message");
+        }
+        log_unsupported_action_fields("claude", hook_event, &unsupported, response);
+
+        match response.decision.as_deref() {
             Some("allow") => Some(json!({
                 "hookSpecificOutput": {
                     "hookEventName": HOOK_EVENT_PERMISSION_REQUEST,
@@ -183,7 +196,7 @@ impl SourceAdapter for ClaudeAdapter {
                     "hookEventName": HOOK_EVENT_PERMISSION_REQUEST,
                     "decision": {
                         "behavior": "deny",
-                        "message": reason.unwrap_or("Denied by user via Agent Island")
+                        "message": response.message_or_reason().unwrap_or("Denied by user via Agent Island")
                     }
                 }
             })),

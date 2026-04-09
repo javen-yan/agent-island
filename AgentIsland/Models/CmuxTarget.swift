@@ -11,7 +11,7 @@ struct CmuxTarget: Sendable {
     let workspaceId: String
     let surfaceId: String
 
-    init(workspaceId: String, surfaceId: String) {
+    nonisolated init(workspaceId: String, surfaceId: String) {
         self.workspaceId = workspaceId
         self.surfaceId = surfaceId
     }

@@ -71,8 +71,11 @@ class AgentSessionMonitor: ObservableObject {
 
             HookSocketServer.shared.respondToPermission(
                 toolUseId: permission.toolUseId,
-                decision: "deny",
-                reason: reason
+                action: UnifiedAgentAction(
+                    targetEventId: permission.toolUseId,
+                    decision: .deny,
+                    message: reason
+                )
             )
 
             await SessionStore.shared.process(

@@ -38,6 +38,7 @@ actor FileSyncScheduler {
             guard !Task.isCancelled else { return }
 
             Self.logger.debug("Executing sync for session \(sessionId.prefix(8), privacy: .public)")
+            AppDiagnosticsLogger.log(.debug, category: .session, "Executing file sync session=\(sessionId) cwd=\(cwd)")
             await handler(sessionId, cwd)
         }
     }
@@ -47,6 +48,7 @@ actor FileSyncScheduler {
         if let existing = pendingSyncs.removeValue(forKey: sessionId) {
             existing.cancel()
             Self.logger.debug("Cancelled pending sync for session \(sessionId.prefix(8), privacy: .public)")
+            AppDiagnosticsLogger.log(.trace, category: .session, "Cancelled pending file sync session=\(sessionId)")
         }
     }
 

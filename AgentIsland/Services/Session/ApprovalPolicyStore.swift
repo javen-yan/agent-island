@@ -18,6 +18,7 @@ struct ApprovalRule: Codable, Equatable, Sendable, Identifiable {
 
 actor ApprovalPolicyStore {
     static let shared = ApprovalPolicyStore()
+    nonisolated static let rulesDidChangeNotification = Notification.Name("ApprovalPolicyStore.rulesDidChange")
 
     private let fileManager: FileManager
     private let policiesURL: URL
@@ -25,9 +26,8 @@ actor ApprovalPolicyStore {
 
     init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
-        let root = fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent(".agent-island", isDirectory: true)
-        self.policiesURL = root.appendingPathComponent("approval-policies.json")
+        self.policiesURL = AppPathResolver.approvalPoliciesFileURL
+        try? AppPathResolver.migrateLegacyRuntimeIfNeeded(fileManager: fileManager)
     }
 
     func matchingPolicy(for event: HookEvent) async -> ApprovalPolicy? {
@@ -40,6 +40,21 @@ actor ApprovalPolicyStore {
         return rules.last(where: {
             $0.agentType == event.agentType &&
             $0.toolName == tool &&
+            $0.inputSignature == signature
+        })?.policy
+    }
+
+    func matchingPolicy(for event: UnifiedAgentEvent) async -> ApprovalPolicy? {
+        guard event.kind == .permissionRequested,
+              let tool = event.payload.tool,
+              let signature = Self.signature(for: tool.arguments) else {
+            return nil
+        }
+
+        let rules = await loadRules()
+        return rules.last(where: {
+            $0.agentType == event.provider &&
+            $0.toolName == tool.toolName &&
             $0.inputSignature == signature
         })?.policy
     }
@@ -104,6 +119,9 @@ actor ApprovalPolicyStore {
         }
 
         try? data.write(to: policiesURL, options: .atomic)
+        await MainActor.run {
+            NotificationCenter.default.post(name: Self.rulesDidChangeNotification, object: nil)
+        }
         await AgentHookPluginManager.shared.refreshBridgeProfiles(using: rules)
     }
 
@@ -113,6 +131,22 @@ actor ApprovalPolicyStore {
         }
 
         let normalized = normalize(toolInput.mapValues(\.value))
+        guard JSONSerialization.isValidJSONObject(normalized),
+              let data = try? JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys]),
+              let signature = String(data: data, encoding: .utf8),
+              !signature.isEmpty else {
+            return nil
+        }
+
+        return signature
+    }
+
+    private static func signature(for toolInput: [String: String]) -> String? {
+        guard !toolInput.isEmpty else {
+            return nil
+        }
+
+        let normalized = normalize(toolInput)
         guard JSONSerialization.isValidJSONObject(normalized),
               let data = try? JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys]),
               let signature = String(data: data, encoding: .utf8),

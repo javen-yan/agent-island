@@ -15,6 +15,61 @@ nonisolated private let toolEventLogger = Logger(subsystem: "com.agentisland", c
 enum ToolEventProcessor {
     // MARK: - Tool Tracking
 
+    nonisolated static func processUnifiedToolEvent(
+        event: UnifiedAgentEvent,
+        session: inout SessionState
+    ) {
+        guard let tool = event.payload.tool,
+              let toolUseId = tool.callId else { return }
+
+        if session.subagentState.hasActiveSubagent && tool.toolName != "Task" {
+            return
+        }
+
+        switch event.kind {
+        case .permissionRequested, .toolStarted:
+            session.toolTracker.startTool(id: toolUseId, name: tool.toolName)
+
+            let toolExists = session.chatItems.contains { $0.id == toolUseId }
+            if !toolExists {
+                let shouldAwaitPermission = event.kind == .permissionRequested
+                let initialStatus: ToolStatus = shouldAwaitPermission ? .waitingForApproval : .running
+                let placeholderItem = ChatHistoryItem(
+                    id: toolUseId,
+                    type: .toolCall(ToolCallItem(
+                        agentType: session.agentType,
+                        name: tool.toolName,
+                        input: extractToolInput(from: tool.arguments),
+                        detailLocator: ToolCallItem.DetailLocator(
+                            sessionId: session.sessionId,
+                            cwd: session.cwd,
+                            toolUseId: toolUseId
+                        ),
+                        status: initialStatus,
+                        approvalMode: shouldAwaitPermission ? event.approvalMode : nil,
+                        result: nil,
+                        structuredResult: nil,
+                        subagentTools: []
+                    )),
+                    timestamp: event.timestamp
+                )
+                session.chatItems.append(placeholderItem)
+                toolEventLogger.debug("Created unified placeholder tool entry for \(toolUseId.prefix(16), privacy: .public)")
+            }
+
+        case .toolCompleted:
+            session.toolTracker.completeTool(id: toolUseId, success: true)
+            updateToolStatus(in: &session, toolId: toolUseId, status: .success)
+
+        case .toolFailed:
+            session.toolTracker.completeTool(id: toolUseId, success: false)
+            updateToolStatus(in: &session, toolId: toolUseId, status: .error)
+
+        default:
+            return
+        }
+    }
+
     /// Process PreToolUse event for tool tracking
     nonisolated static func processPreToolUse(
         event: HookEvent,
@@ -28,23 +83,20 @@ enum ToolEventProcessor {
         if !toolExists {
             let input = extractToolInput(from: event.toolInput)
             let shouldAwaitPermission = event.shouldAwaitPermissionResponse
-            let approvalMode: ApprovalMode? = shouldAwaitPermission
-                ? ({
-                    switch event.approvalRequestType {
-                    case .terminal:
-                        return .terminal
-                    case .none, .app:
-                        return .nativeApp
-                    }
-                })()
-                : nil
+            let approvalMode = shouldAwaitPermission ? event.resolvedApprovalMode : nil
             let initialStatus: ToolStatus =
                 shouldAwaitPermission ? .waitingForApproval : .running
             let placeholderItem = ChatHistoryItem(
                 id: toolUseId,
                 type: .toolCall(ToolCallItem(
+                    agentType: session.agentType,
                     name: toolName,
                     input: input,
+                    detailLocator: ToolCallItem.DetailLocator(
+                        sessionId: session.sessionId,
+                        cwd: session.cwd,
+                        toolUseId: toolUseId
+                    ),
                     status: initialStatus,
                     approvalMode: approvalMode,
                     result: nil,
@@ -95,6 +147,65 @@ enum ToolEventProcessor {
     }
 
     // MARK: - Subagent Tracking
+
+    nonisolated static func processUnifiedSubagentEvent(
+        event: UnifiedAgentEvent,
+        session: inout SessionState
+    ) {
+        guard let tool = event.payload.tool,
+              let toolUseId = tool.callId else { return }
+
+        switch event.kind {
+        case .permissionRequested, .toolStarted:
+            if tool.toolName == "Task" {
+                session.subagentState.startTask(
+                    taskToolId: toolUseId,
+                    description: tool.arguments["description"]
+                )
+                toolEventLogger.debug("Started unified Task subagent tracking: \(toolUseId.prefix(12), privacy: .public)")
+            } else if session.subagentState.hasActiveSubagent {
+                let subagentTool = SubagentToolCall(
+                    id: toolUseId,
+                    name: tool.toolName,
+                    input: extractToolInput(from: tool.arguments),
+                    status: event.kind == .permissionRequested ? .waitingForApproval : .running,
+                    timestamp: event.timestamp
+                )
+                session.subagentState.addSubagentTool(subagentTool)
+            }
+
+        case .toolCompleted:
+            if tool.toolName == "Task" {
+                if let taskContext = session.subagentState.activeTasks[toolUseId] {
+                    attachSubagentToolsToTask(
+                        session: &session,
+                        taskToolId: toolUseId,
+                        subagentTools: taskContext.subagentTools
+                    )
+                }
+                session.subagentState.stopTask(taskToolId: toolUseId)
+            } else {
+                session.subagentState.updateSubagentToolStatus(toolId: toolUseId, status: .success)
+            }
+
+        case .toolFailed:
+            if tool.toolName == "Task" {
+                if let taskContext = session.subagentState.activeTasks[toolUseId] {
+                    attachSubagentToolsToTask(
+                        session: &session,
+                        taskToolId: toolUseId,
+                        subagentTools: taskContext.subagentTools
+                    )
+                }
+                session.subagentState.stopTask(taskToolId: toolUseId)
+            } else {
+                session.subagentState.updateSubagentToolStatus(toolId: toolUseId, status: .error)
+            }
+
+        default:
+            return
+        }
+    }
 
     /// Process PreToolUse event for subagent tracking
     nonisolated static func processSubagentPreToolUse(
@@ -264,5 +375,9 @@ enum ToolEventProcessor {
             }
         }
         return input
+    }
+
+    private nonisolated static func extractToolInput(from toolArguments: [String: String]) -> [String: String] {
+        toolArguments
     }
 }

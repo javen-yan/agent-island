@@ -8,7 +8,7 @@ use std::process;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::protocol::{AgentSource, BridgeProfile, HookPayload};
+use crate::protocol::{AgentSource, BridgeProfile, HookPayload, PermissionDecision};
 
 pub use claude::ClaudeAdapter;
 pub use codex::CodexAdapter;
@@ -189,19 +189,36 @@ pub trait SourceAdapter {
     }
     fn map_permission_response(
         &self,
-        decision: Option<&str>,
-        reason: Option<&str>,
+        response: &PermissionDecision,
         hook_event: &str,
     ) -> Option<AgentPermissionResponse> {
-        self.permission_response(decision, reason, hook_event)
+        self.permission_response(response, hook_event)
             .map(|body| AgentPermissionResponse { body })
     }
-    fn permission_response(
-        &self,
-        decision: Option<&str>,
-        reason: Option<&str>,
-        hook_event: &str,
-    ) -> Option<Value>;
+    fn permission_response(&self, response: &PermissionDecision, hook_event: &str) -> Option<Value>;
+}
+
+pub fn log_unsupported_action_fields(
+    provider: &str,
+    hook_event: &str,
+    fields: &[&str],
+    response: &PermissionDecision,
+) {
+    if fields.is_empty() {
+        return;
+    }
+
+    eprintln!(
+        "{} response adapter downgraded unsupported fields for {}: {:?} decision={:?} message={:?} continue={:?} stop_reason={:?} patch={}",
+        provider,
+        hook_event,
+        fields,
+        response.decision,
+        response.message,
+        response.should_continue,
+        response.stop_reason,
+        response.has_patch()
+    );
 }
 
 #[derive(Debug, Clone)]

@@ -1,37 +1,40 @@
 # Agent Extension Guide
 
-This guide explains how to add a new hook-capable agent to AgentIsland without forcing the UI to learn a new raw protocol.
+This guide explains how to add a new provider to AgentIsland without teaching the UI a new raw protocol.
 
 Related docs:
 
 - [Docs Index](./README.md)
-- [Internal Hook Protocol](./internal-hook-protocol.md)
-- [Multi-Agent Architecture Draft](./multi-agent-architecture.md)
+- [Unified Agent Protocol v1](./unified-agent-protocol.md)
+- [Multi-Agent Architecture](./multi-agent-architecture.md)
+- [Agent Integration Checklist](./agent-integration-checklist.md)
 
 ## Design Rule
 
-New agents must integrate through the same layered model:
+New providers must integrate through the same layered model:
 
-1. Official agent hooks
-2. Agent-specific adapter
-3. AgentIsland internal hook protocol
-4. Shared Swift runtime and UI
+1. official provider runtime
+2. provider-specific adapter
+3. unified event and action mapping
+4. shared Swift runtime and UI
 
-Do not wire a new agent directly into UI logic through raw official event names unless there is no viable internal mapping.
+Do not wire a new provider directly into UI logic through raw official event names unless there is no viable unified mapping.
 
 ## What Must Stay Stable
 
-The UI and session engine should continue to rely on the internal protocol, especially:
+The UI and session engine should continue to rely on:
 
-- `internal_event`
-- `permission_mode`
-- `extra`
+- semantic event kinds
+- semantic action payloads
+- explicit provider capabilities
 
-The new agent should map its official hooks into those fields instead of adding new UI-only branches first.
-
-If you are unsure whether a field belongs in the stable contract, prefer updating the adapter and keeping the field inside `extra` until there is a stronger cross-agent need.
+If you are unsure whether a field belongs in the stable contract, keep it inside provider-specific payload metadata until there is a stronger cross-provider need.
 
 ## Integration Checklist
+
+For the execution-order checklist, use:
+
+- [Agent Integration Checklist](./agent-integration-checklist.md)
 
 ### 1. Add a Rust adapter
 
@@ -41,14 +44,18 @@ Create a new file under:
 bridge-rs/src/adapter/
 ```
 
+A starter skeleton now lives at:
+
+```text
+bridge-rs/src/adapter/provider_template.rs.example
+```
+
 Typical shape:
 
 - parse official payload
-- decide which events should emit
-- compute shared `status`
-- compute `internal_event`
-- compute `permission_mode`
-- build `extra`
+- translate into unified event kinds
+- compute shared runtime status
+- build provider payload metadata
 - build official permission response JSON
 
 Then register it in:
@@ -56,36 +63,34 @@ Then register it in:
 - `bridge-rs/src/adapter/mod.rs`
 - `bridge-rs/src/protocol.rs`
 
-## 2. Map official events to internal events
+### 2. Map official events to unified events
 
-Your adapter should emit one of the stable internal events:
+Your adapter should emit semantic events such as:
 
+- `session.started`
+- `session.ended`
+- `turn.input_submitted`
+- `turn.completed`
+- `tool.pending`
+- `tool.started`
+- `tool.completed`
+- `tool.failed`
+- `permission.requested`
 - `notification`
-- `idle_prompt`
-- `pre_compact`
-- `session_started`
-- `session_ended`
-- `stopped`
-- `subagent_stopped`
-- `tool_will_run`
-- `tool_did_run`
-- `user_prompt_submitted`
-- `permission_requested`
-- `unknown`
 
-If the new agent exposes a permission flow, it should also emit `permission_mode`.
+If the new provider exposes a permission flow, its capability descriptor should also make the approval model explicit.
 
-## 3. Define permission behavior
+### 3. Define permission behavior
 
 Decide:
 
 - what official event starts approval
-- whether approval is `native_app` or `terminal`
+- whether approval is native, terminal-backed, or unsupported
 - how to generate the official response JSON
 
-The response format must remain official-agent-specific. Only the internal event model is shared.
+The response format must remain provider-specific. Only the unified action model is shared.
 
-## 4. Add installer support
+### 4. Add installer support
 
 Update:
 
@@ -100,20 +105,20 @@ Tasks:
 - define install / repair / uninstall behavior
 - define capability metadata
 
-## 5. Add Swift runtime support
+### 5. Add Swift runtime support
 
-Update the agent enum and capability surfaces where needed, but keep Swift business logic aligned to internal protocol.
+Update the agent enum and capability surfaces where needed, but keep Swift business logic aligned to the unified protocol.
 
 Important files:
 
 - `AgentIsland/Models/AgentPlatform.swift`
 - `AgentIsland/Services/Hooks/AgentPermissionAdapter.swift`
 - `AgentIsland/Services/Hooks/HookSocketServer.swift`
-- `AgentIsland/Models/SessionEvent.swift`
+- `AgentIsland/Models/UnifiedAgentProtocol.swift`
 
-## 6. Use `extra` carefully
+### 6. Use provider payload carefully
 
-`extra` is the escape hatch for agent-specific metadata.
+Provider payload is the escape hatch for provider-specific metadata.
 
 Good examples:
 
@@ -121,7 +126,7 @@ Good examples:
 - matcher names
 - command text
 - escalation hints
-- agent-specific debug fields
+- provider-specific debug fields
 
 Bad examples:
 
@@ -129,40 +134,42 @@ Bad examples:
 - canonical approval state
 - fields already represented in the stable protocol
 
-## 7. Add tests
+### 7. Add tests
 
 At minimum, add:
 
-### Event mapping tests
+#### Event mapping tests
 
 In `bridge-rs`, add dispatch tests that verify:
 
 - official event name is preserved
-- internal event is correct
-- permission mode is correct
-- important `extra` fields are present
+- unified event kind is correct
+- capability-relevant approval metadata is correct
+- important provider payload fields are present
 
-### Permission response tests
+#### Permission response tests
 
 Also verify:
 
 - allow response shape
 - deny response shape
-- no-response cases if the agent expects them
+- no-response cases if the provider expects them
 
-## 8. Update docs
+### 8. Update docs
 
-When a new agent is added, update:
+When a new provider is added, update:
 
 - `README.md`
 - `README.zh.md`
-- `docs/internal-hook-protocol.md`
+- `docs/README.md`
+- `docs/README.zh.md`
+- `docs/agent-extension-guide.md`
 
 At minimum, document:
 
 - official hook entry points
 - approval entry point
-- internal event mapping
+- unified event mapping
 - validation status
 
 ## Recommended Implementation Order
@@ -174,20 +181,3 @@ At minimum, document:
 5. Connect Swift runtime
 6. Validate build
 7. Update docs
-
-## Current Reference Integrations
-
-Use these as concrete examples:
-
-- Claude
-  - official approval entry: `PermissionRequest`
-- Codex
-  - official approval entry: `PreToolUse`
-- Gemini
-  - official approval entry: `BeforeTool`
-
-All three end up in the same internal approval event:
-
-- `permission_requested`
-
-That is the pattern future integrations should follow whenever possible.

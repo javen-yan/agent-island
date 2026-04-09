@@ -1,7 +1,13 @@
+use std::ffi::CStr;
+use std::process::Command;
+
 use serde_json::{json, Value};
 
+use crate::protocol::PermissionDecision;
+
 use super::{
-    default_extra_payload, default_process_info, normalize_input_with_options, BridgeCapabilities,
+    default_extra_payload, first_string, normalize_input_with_options, BridgeCapabilities,
+    log_unsupported_action_fields,
     NormalizedInput, NormalizedInputOptions, PermissionCapability, ProcessInfo, SourceAdapter,
     HOOK_EVENT_AFTER_TOOL, HOOK_EVENT_BEFORE_TOOL, HOOK_EVENT_NOTIFICATION,
     HOOK_EVENT_POST_TOOL_USE, HOOK_EVENT_PRE_TOOL_USE, HOOK_EVENT_SESSION_END,
@@ -93,7 +99,10 @@ impl SourceAdapter for GeminiAdapter {
     }
 
     fn process_info(&self, input: &Value) -> ProcessInfo {
-        default_process_info(input)
+        ProcessInfo {
+            pid: Some(parent_pid() as i64),
+            tty: resolve_gemini_tty().or_else(|| first_string(input, &["tty"])),
+        }
     }
 
     fn internal_event(
@@ -153,19 +162,69 @@ impl SourceAdapter for GeminiAdapter {
         extra
     }
 
-    fn permission_response(
-        &self,
-        decision: Option<&str>,
-        reason: Option<&str>,
-        _hook_event: &str,
-    ) -> Option<Value> {
-        if decision == Some("deny") {
+    fn permission_response(&self, response: &PermissionDecision, hook_event: &str) -> Option<Value> {
+        let mut unsupported = Vec::new();
+        if response.should_continue.is_some() {
+            unsupported.push("continue");
+        }
+        if response.stop_reason.is_some() {
+            unsupported.push("stop_reason");
+        }
+        if response.has_patch() {
+            unsupported.push("patch");
+        }
+        if response.message.is_some() && response.decision.as_deref() != Some("deny") {
+            unsupported.push("message");
+        }
+        log_unsupported_action_fields("gemini", hook_event, &unsupported, response);
+
+        if response.decision.as_deref() == Some("deny") {
             Some(json!({
                 "decision": "deny",
-                "reason": reason.unwrap_or("Denied from Agent Island")
+                "reason": response.message_or_reason().unwrap_or("Denied from Agent Island")
             }))
         } else {
             None
         }
+    }
+}
+
+fn parent_pid() -> u32 {
+    unsafe { libc::getppid() as u32 }
+}
+
+fn resolve_gemini_tty() -> Option<String> {
+    let tty_from_parent = Command::new("ps")
+        .args(["-p", &parent_pid().to_string(), "-o", "tty="])
+        .output()
+        .ok()
+        .and_then(|output| {
+            if !output.status.success() {
+                return None;
+            }
+
+            let tty = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if tty.is_empty() || tty == "??" || tty == "-" {
+                None
+            } else if tty.starts_with("/dev/") {
+                Some(tty)
+            } else {
+                Some(format!("/dev/{tty}"))
+            }
+        });
+
+    tty_from_parent
+        .or_else(|| tty_name_for_fd(libc::STDIN_FILENO))
+        .or_else(|| tty_name_for_fd(libc::STDOUT_FILENO))
+}
+
+fn tty_name_for_fd(fd: i32) -> Option<String> {
+    unsafe {
+        let ptr = libc::ttyname(fd);
+        if ptr.is_null() {
+            return None;
+        }
+
+        CStr::from_ptr(ptr).to_str().ok().map(str::to_owned)
     }
 }
