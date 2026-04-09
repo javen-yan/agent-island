@@ -1,96 +1,99 @@
 # Agent Extension Guide
 
-This guide explains how to add a new provider to AgentIsland without teaching the UI a new raw protocol.
+This guide explains how to add another agent integration using the current shared runtime design.
 
 Related docs:
 
 - [Docs Index](./README.md)
-- [Unified Agent Protocol v1](./unified-agent-protocol.md)
+- [Current Product Overview](./current-product-overview.md)
 - [Multi-Agent Architecture](./multi-agent-architecture.md)
-- [Agent Integration Checklist](./agent-integration-checklist.md)
+- [Unified Agent Protocol v1](./unified-agent-protocol.md)
 
-## Design Rule
+## Goal
 
-New providers must integrate through the same layered model:
+A new agent should feel like another integration on top of the existing product runtime, not like a brand-new product mode.
 
-1. official provider runtime
-2. provider-specific adapter
-3. unified event and action mapping
-4. shared Swift runtime and UI
+That means:
 
-Do not wire a new provider directly into UI logic through raw official event names unless there is no viable unified mapping.
+- provider-specific protocol handling stays at the adapter boundary
+- shared session state stays provider-agnostic where possible
+- the UI continues to render one common model
+- unsupported capabilities are expressed explicitly instead of hidden
 
-## What Must Stay Stable
+## Current Extension Layers
 
-The UI and session engine should continue to rely on:
+When adding a provider, work through these layers in order:
 
-- semantic event kinds
-- semantic action payloads
-- explicit provider capabilities
+1. Provider runtime and hook model
+2. Rust bridge adapter
+3. Swift hook plugin and capability declaration
+4. Transcript / history integration
+5. Runtime state reconciliation
+6. UI verification and docs
 
-If you are unsure whether a field belongs in the stable contract, keep it inside provider-specific payload metadata until there is a stronger cross-provider need.
+## 1. Define the Provider Contract
 
-## Integration Checklist
+Before touching code, decide:
 
-For the execution-order checklist, use:
+- what official hook or event surfaces exist
+- what transcript or history source exists
+- whether approvals are app-managed, terminal-managed, provider-managed, or unavailable
+- whether the provider emits enough metadata for stable session tracking
 
-- [Agent Integration Checklist](./agent-integration-checklist.md)
+Do not start from UI requirements first. Start from the provider's real runtime contract.
 
-### 1. Add a Rust adapter
+## 2. Add a Bridge Adapter
 
-Create a new file under:
+Create a new adapter under:
 
 ```text
 bridge-rs/src/adapter/
 ```
 
-A starter skeleton now lives at:
+Current examples:
 
-```text
-bridge-rs/src/adapter/provider_template.rs.example
-```
+- `bridge-rs/src/adapter/claude.rs`
+- `bridge-rs/src/adapter/codex.rs`
+- `bridge-rs/src/adapter/gemini.rs`
 
-Typical shape:
+Your adapter is responsible for:
 
-- parse official payload
-- translate into unified event kinds
-- compute shared runtime status
-- build provider payload metadata
-- build official permission response JSON
+- parsing official provider payloads
+- normalizing tool name, tool id, session id, cwd, and message fields
+- mapping provider-native events into stable internal runtime semantics
+- preserving provider-specific metadata in `extra`
+- encoding provider-native permission responses when supported
 
-Then register it in:
+Register the adapter in:
 
 - `bridge-rs/src/adapter/mod.rs`
+
+If the provider needs protocol-level additions, also update:
+
 - `bridge-rs/src/protocol.rs`
+- `bridge-rs/src/dispatcher.rs`
 
-### 2. Map official events to unified events
+## 3. Decide the Approval Model
 
-Your adapter should emit semantic events such as:
+This is one of the most important extension decisions.
 
-- `session.started`
-- `session.ended`
-- `turn.input_submitted`
-- `turn.completed`
-- `tool.pending`
-- `tool.started`
-- `tool.completed`
-- `tool.failed`
-- `permission.requested`
-- `notification`
+Pick the real behavior:
 
-If the new provider exposes a permission flow, its capability descriptor should also make the approval model explicit.
+- app-managed approval
+- terminal confirmation surfaced in app
+- provider-managed approval with limited app control
+- no approval surface
 
-### 3. Define permission behavior
+Do not fake native approvals if the provider actually expects terminal confirmation.
 
-Decide:
+Codex is the current reference for terminal-managed confirmation:
 
-- what official event starts approval
-- whether approval is native, terminal-backed, or unsupported
-- how to generate the official response JSON
+- the app shows waiting state
+- the terminal still owns the final decision
 
-The response format must remain provider-specific. Only the unified action model is shared.
+Claude is the current reference for app-managed approvals.
 
-### 4. Add installer support
+## 4. Add Hook Plugin and Capabilities
 
 Update:
 
@@ -98,86 +101,153 @@ Update:
 AgentIsland/Services/Hooks/AgentHookPlugin.swift
 ```
 
-Tasks:
+You need to define:
 
-- add the new plugin
-- define official hook event registration
-- define install / repair / uninstall behavior
-- define capability metadata
+- availability detection
+- install / repair / uninstall behavior
+- derived bridge profile behavior
+- supported events
+- approval source
+- whether the provider supports transcript history
+- whether the provider supports permission decisions
 
-### 5. Add Swift runtime support
+The goal is for the provider to declare capabilities clearly enough that product logic does not branch on provider name unless absolutely necessary.
 
-Update the agent enum and capability surfaces where needed, but keep Swift business logic aligned to the unified protocol.
+## 5. Extend Agent Models
 
-Important files:
+Update the shared agent model surfaces only where needed:
 
 - `AgentIsland/Models/AgentPlatform.swift`
 - `AgentIsland/Services/Hooks/AgentPermissionAdapter.swift`
-- `AgentIsland/Services/Hooks/HookSocketServer.swift`
 - `AgentIsland/Models/UnifiedAgentProtocol.swift`
 
-### 6. Use provider payload carefully
+Keep these changes minimal.
 
-Provider payload is the escape hatch for provider-specific metadata.
+If something is only useful for one provider, keep it in adapter metadata instead of promoting it into the global model too early.
 
-Good examples:
+## 6. Add Transcript Support
 
-- official event metadata
-- matcher names
-- command text
-- escalation hints
-- provider-specific debug fields
+If the provider has a persistent transcript or event log, connect it through:
 
-Bad examples:
+```text
+AgentIsland/Services/Session/SessionTranscriptProvider.swift
+```
 
-- normalized business meaning
-- canonical approval state
-- fields already represented in the stable protocol
+If needed, also add parsing support near:
 
-### 7. Add tests
+```text
+AgentIsland/Services/Session/ConversationParser.swift
+```
+
+Transcript support should cover:
+
+- initial history load
+- incremental sync
+- conversation metadata
+- tool result recovery
+- lazy detail loading for large tool outputs
+
+If the provider does not support transcripts, keep that limitation explicit instead of simulating history.
+
+## 7. Reconcile Runtime State
+
+The shared runtime ultimately flows through:
+
+```text
+AgentIsland/Services/State/SessionStore.swift
+```
+
+Your integration should work with the existing session model for:
+
+- tool start and completion
+- approval waiting state
+- interrupted sessions
+- transcript backfill
+- session summaries
+- memory-bounded chat history
+
+Try to make the new provider fit the runtime rather than adding provider-only paths inside the core state machine.
+
+## 8. Verify Tool Result Behavior
+
+Current product behavior stores only preview-sized tool outputs in steady-state memory and loads full detail lazily from transcripts.
+
+A new provider should preserve that behavior where possible.
+
+Check:
+
+- preview truncation works
+- lazy detail loading works
+- very large tool output does not blow up the chat view
+- missing transcript detail degrades gracefully
+
+## 9. Add Tests
 
 At minimum, add:
 
-#### Event mapping tests
+### Bridge tests
 
-In `bridge-rs`, add dispatch tests that verify:
+Verify:
 
-- official event name is preserved
-- unified event kind is correct
-- capability-relevant approval metadata is correct
-- important provider payload fields are present
+- event mapping
+- approval state mapping
+- permission mode mapping
+- provider-specific metadata preservation
+- permission response encoding
 
-#### Permission response tests
+Typical location:
 
-Also verify:
+```text
+bridge-rs/src/dispatcher.rs
+```
 
-- allow response shape
-- deny response shape
-- no-response cases if the provider expects them
+### Runtime tests or validation paths
 
-### 8. Update docs
+Verify:
 
-When a new provider is added, update:
+- plugin install and repair path
+- history load path
+- approval state rendering
+- transcript detail loading if supported
+
+## 10. Update User-Facing Docs
+
+When the provider is real enough to ship, update:
 
 - `README.md`
 - `README.zh.md`
 - `docs/README.md`
 - `docs/README.zh.md`
-- `docs/agent-extension-guide.md`
+- this extension guide
+- any architecture doc that needs a new runtime example
 
-At minimum, document:
+Document at least:
 
-- official hook entry points
-- approval entry point
-- unified event mapping
+- integration model
+- approval model
+- history model
 - validation status
 
-## Recommended Implementation Order
+## Practical Checklist
 
-1. Add Rust adapter
-2. Add dispatch tests
-3. Add permission response tests
-4. Add installer support
-5. Connect Swift runtime
-6. Validate build
-7. Update docs
+Use this order:
+
+1. Confirm official provider behavior.
+2. Add the Rust adapter.
+3. Add bridge tests.
+4. Add hook plugin and capabilities.
+5. Add transcript support if available.
+6. Verify runtime reconciliation.
+7. Verify large tool output behavior.
+8. Update docs.
+
+## Summary
+
+The rule of thumb is simple:
+
+- keep provider-specific logic near the adapter
+- keep runtime semantics shared
+- keep approval behavior honest
+- keep large history bounded
+
+If a new integration preserves those four properties, it will fit AgentIsland's current design.

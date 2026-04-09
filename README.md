@@ -4,94 +4,98 @@
   <p align="center">
     macOS menu bar companion for Claude, Codex, and Gemini sessions.
     <br>
-    Unified approvals, session visibility, and tool timeline in one place.
+    Unified runtime visibility, approvals, and chat history in one place.
   </p>
   <p align="center">
     <a href="https://github.com/javen-yan/agent-island/releases/latest" target="_blank" rel="noopener noreferrer">
       <img src="https://img.shields.io/github/v/release/javen-yan/agent-island?style=rounded&color=white&labelColor=000000&label=release" alt="Latest Release">
     </a>
-    <a href="#" target="_blank" rel="noopener noreferrer">
-      <img alt="Downloads" src="https://img.shields.io/github/downloads/javen-yan/agent-island/total?style=rounded&color=white&labelColor=000000">
+    <a href="https://javen-yan.github.io/agent-island/appcast.xml" target="_blank" rel="noopener noreferrer">
+      <img alt="Sparkle Appcast" src="https://img.shields.io/badge/appcast-Sparkle-white?style=rounded&labelColor=000000">
     </a>
   </p>
 </div>
 
-[Chinese README](./README.zh.md)
+[中文 README](./README.zh.md)
 
 More documentation: [Docs Index](./docs/README.md)
 
-## Introduction
+## What It Is
 
-AgentIsland is a macOS menu bar app for terminal-based AI agents. It pulls key session information into one place so users spend less time bouncing between terminals, editors, and approval dialogs.
+AgentIsland is a macOS menu bar app for terminal-based AI agents. It pulls session state, tool activity, approval status, and recent conversation history into a single surface so you do not need to keep jumping between terminals.
 
-It currently focuses on five areas:
-
-- Approval requests
-- Tool execution status
-- Session lists
-- Session history
-- Runtime visibility
-
-The current primary integrations are:
+It currently supports:
 
 - Claude
 - Codex
 - Gemini
 
-Each one follows its own official hook protocol, then maps into AgentIsland's stable internal protocol before reaching the UI.
+## Current Product Design
+
+AgentIsland is now organized around one shared runtime:
+
+- Agent-specific hooks and transcripts are ingested through provider adapters.
+- The Rust bridge normalizes provider events into a stable internal payload.
+- Swift runtime state is centered on `SessionStore`, `SessionTranscriptProvider`, and unified event handling.
+- The UI renders one common session model instead of separate product flows per agent.
+
+Important current behavior:
+
+- Claude supports app-managed approvals and transcript-backed history.
+- Codex surfaces terminal confirmations in the app, but the actual approval still happens in the terminal.
+- Codex dangerous command confirmation now uses both built-in rules and user-configurable regex extensions.
+- Large tool outputs are kept as previews in memory and loaded lazily from transcripts when needed.
 
 ## Current Capabilities
 
 - Menu bar / notch entry point
 - Multi-session visibility
 - Tool execution timeline
-- Approval flow
-- Session history
-- Hook install, repair, and redistribution workflow
-- Internal protocol layer: `internal_event`, `permission_mode`, `extra`
+- Unified approval state
+- Transcript-backed history
+- Lazy full-output loading for large tool results
+- Hook install, repair, and bridge redistribution workflow
+- Bridge and app diagnostics controls
+- Sparkle release + appcast publishing flow
 
 ## Supported Agents
 
-| Agent | Official hook entry | Approval entry | Internal approval event | Status |
+| Agent | Integration Model | Approval Model | History Model | Status |
 | --- | --- | --- | --- | --- |
-| Claude | Claude Code hooks | `PermissionRequest` | `permission_requested` | Verified |
-| Codex | Codex hooks | `PreToolUse` (`Bash`) | `permission_requested` | Verified |
-| Gemini | Gemini hooks | `BeforeTool` | `permission_requested` | Integrated, needs broader validation |
+| Claude | Official hooks + JSONL transcript parsing | App-managed approvals | Transcript-backed | Verified |
+| Codex | Official hooks + transcript parsing | Terminal confirmation surfaced in app | Transcript-backed | Verified |
+| Gemini | Official hooks + bridge adapter | Provider-driven approval flow | Runtime-integrated | Integrated |
 
 ## Architecture
 
-AgentIsland uses three layers:
+AgentIsland currently uses four practical layers:
 
-1. Official protocol layer
-   Each agent follows its own official hook protocol.
+1. Provider layer
+   Claude, Codex, and Gemini each keep their own official hook semantics.
 
-2. Internal protocol layer
-   The Rust bridge maps official events into a stable `HookPayload`.
+2. Bridge layer
+   `bridge-rs` maps provider-native events into a stable runtime payload.
 
-3. UI / state layer
-   Swift runtime and UI prefer internal protocol fields instead of raw official event names.
+3. Runtime layer
+   Swift services manage sessions, transcript sync, approvals, tool state, and memory-bounded chat history.
 
-The core stable fields are:
+4. UI layer
+   Notch, chat, session list, and settings all render from the shared runtime state.
 
-- `internal_event`
-- `permission_mode`
-- `extra`
+Start with these docs:
 
-This keeps UI logic stable while allowing agent-specific differences to live inside adapters.
-
-## Documentation
-
-- [Docs Index](./docs/README.md)
-- [Internal Hook Protocol](./docs/internal-hook-protocol.md)
-- [Multi-Agent Architecture Draft](./docs/multi-agent-architecture.md)
-- [Agent Extension Guide](./docs/agent-extension-guide.md)
-- [Terminal Interaction Guide](./docs/terminal-interaction.md)
+- [Current Product Overview](./docs/current-product-overview.md)
+- [Unified Agent Protocol v1](./docs/unified-agent-protocol.md)
+- [Multi-Agent Architecture](./docs/multi-agent-architecture.md)
+- [Runtime Observability](./docs/runtime-observability.md)
 
 ## Quick Start
 
 ### Requirements
 
 - macOS 15.6+
+- Xcode 17+
+- Rust toolchain
 - Claude Code CLI
 - Optional: Codex CLI, Gemini CLI
 
@@ -101,31 +105,37 @@ This keeps UI logic stable while allowing agent-specific differences to live ins
 ./scripts/build.sh
 ```
 
-By default this builds the app and the Rust bridge, then packages them together.
-
-### CI Artifacts
-
-The `main` branch and `v*` tags trigger the automated build flow:
-
-- Compile the Rust bridge
-- Build `Agent Island.app`
-- Bundle `agent-island-bridge` into the app
-- Package dmg / zip artifacts
-- Create a release automatically for tagged builds
-
-During repair or first install, the app prefers the bundled bridge and then redistributes it to:
-
-```bash
-~/.agent-island/hooks/agent-island-bridge
-```
-
 Skip signing locally:
 
 ```bash
 AGENT_ISLAND_NO_SIGN=1 ./scripts/build.sh
 ```
 
-## Debugging
+### Local Release Build
+
+```bash
+./scripts/create-release.sh
+```
+
+This packages the app, prepares Sparkle artifacts, and aligns local release behavior with CI.
+
+## Release Flow
+
+Tag builds publish through GitHub Actions and now keep appcast history instead of replacing it with a single item.
+
+Current release flow includes:
+
+- build app and bundled bridge
+- package dmg / zip artifacts
+- publish GitHub release assets
+- regenerate and merge Sparkle `appcast.xml`
+- deploy appcast to GitHub Pages
+
+Reference:
+
+- [GitHub appcast](https://javen-yan.github.io/agent-island/appcast.xml)
+
+## Diagnostics
 
 View app logs:
 
@@ -141,28 +151,17 @@ log stream --level debug --predicate 'subsystem == "com.agentisland" AND categor
 
 Common checks:
 
-- If Codex returns `invalid pre-tool-use JSON output`, check `hookSpecificOutput.permissionDecision` and confirm the bridge is up to date.
-- If UI state does not match the CLI agent behavior, inspect `internal_event` before raw `event`.
-- If a new agent integration is wired but not visible in the app, compare the bridge payload against the [Internal Hook Protocol](./docs/internal-hook-protocol.md) and the [Agent Extension Guide](./docs/agent-extension-guide.md).
-- If approvals appear stuck, inspect whether `HookSocketServer` still holds leaked pending permissions.
-
-## Security
-
-- Permission decisions are returned through a local socket
-- No cloud approval synchronization is required
-- README examples do not include full session contents
-
-Current telemetry events:
-
-- `App Launched`
-- `Session Started`
+- If Codex approvals appear stuck, confirm whether the CLI is waiting for terminal confirmation.
+- If session history feels heavy, inspect whether a session contains many large tool outputs and verify lazy loading behavior.
+- If the app state does not match provider behavior, inspect bridge logs before debugging UI code.
+- If release metadata looks wrong, verify the tag version, project version, and generated appcast payload together.
 
 ## Repository Layout
 
 - `AgentIsland/`: macOS app
 - `bridge-rs/`: Rust bridge runtime
-- `docs/`: architecture and extension docs
-- `scripts/`: build and release scripts
+- `docs/`: architecture, runtime, and integration docs
+- `scripts/`: build, packaging, and release scripts
 
 ## Acknowledgements
 

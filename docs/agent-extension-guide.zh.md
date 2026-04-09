@@ -1,96 +1,97 @@
 # Agent 扩展指南
 
-这份文档说明如何给 AgentIsland 接入一个新的 provider，而不让 UI 再理解一套新的原始协议。
+这份文档说明如何沿用当前共享运行时设计，为 AgentIsland 新增一个 agent 集成。
 
 相关文档：
 
 - [文档索引](./README.zh.md)
-- [统一 Agent 协议 v1](./unified-agent-protocol.zh.md)
+- [当前产品总览](./current-product-overview.zh.md)
 - [多 Agent 架构](./multi-agent-architecture.zh.md)
-- [Agent 接入 Checklist](./agent-integration-checklist.zh.md)
+- [统一 Agent 协议 v1](./unified-agent-protocol.zh.md)
 
-## 核心原则
+## 目标
 
-新增 provider 必须沿用同一套分层模型：
+新增的 agent 应该表现为“共享运行时上的另一个 integration”，而不是一套新的产品模式。
 
-1. 官方 provider runtime
-2. provider-specific adapter
-3. 统一事件和动作映射
-4. 共享 Swift runtime 和 UI
+这意味着：
 
-不要让新增 provider 直接把原始官方事件名带进 UI，除非确实没有合理的统一映射方式。
+- provider 专属协议处理留在 adapter 边界
+- 共享 session state 尽量保持 provider 无关
+- UI 继续渲染同一套公共模型
+- 不支持的能力要显式表达，而不是藏在特判里
 
-## 哪些东西必须稳定
+## 当前扩展分层
 
-UI 和状态机应继续依赖：
+新增 provider 时，建议按这几个层次推进：
 
-- 语义事件 kind
-- 语义动作 payload
-- 显式 provider capabilities
+1. Provider runtime 与 hook 模型
+2. Rust bridge adapter
+3. Swift hook plugin 与 capability 声明
+4. Transcript / history 集成
+5. Runtime state 对账
+6. UI 验证与文档更新
 
-如果拿不准某个字段该不该进入稳定协议，优先把它留在 provider-specific payload metadata 里，等确认它具备跨 provider 的通用价值后再升级。
+## 1. 先确认 Provider 合同
 
-## 接入清单
+开始编码前先明确：
 
-如果你要直接按步骤执行，请优先使用：
+- 官方有哪些 hook 或事件入口
+- 是否有 transcript 或历史数据源
+- 审批是应用内接管、终端内确认、provider 自己管理，还是根本没有
+- provider 是否能提供足够稳定的 session 标识和工具元数据
 
-- [Agent 接入 Checklist](./agent-integration-checklist.zh.md)
+不要先从 UI 需求倒推。先从 provider 的真实运行时合同出发。
 
-### 1. 添加 Rust 适配器
+## 2. 添加 Bridge Adapter
 
-在下面目录新增一个适配器：
+在下面目录新增一个 adapter：
 
 ```text
 bridge-rs/src/adapter/
 ```
 
-仓库里现在也保留了一份 adapter 模板：
+当前参考实现：
 
-```text
-bridge-rs/src/adapter/provider_template.rs.example
-```
+- `bridge-rs/src/adapter/claude.rs`
+- `bridge-rs/src/adapter/codex.rs`
+- `bridge-rs/src/adapter/gemini.rs`
 
-建议职责：
+adapter 负责：
 
-- 解析官方 payload
-- 翻译成统一事件 kind
-- 计算共享 runtime status
-- 组装 provider payload metadata
-- 生成官方权限响应 JSON
+- 解析官方 provider 载荷
+- 规整 tool name、tool id、session id、cwd、message 等公共字段
+- 把 provider 原生事件映射成稳定的内部运行时语义
+- 通过 `extra` 保留 provider 专属元数据
+- 如果支持审批，生成 provider 原生权限响应
 
-然后在下面位置注册：
+注册位置通常包括：
 
 - `bridge-rs/src/adapter/mod.rs`
+
+如果需要协议层补充，也同步更新：
+
 - `bridge-rs/src/protocol.rs`
+- `bridge-rs/src/dispatcher.rs`
 
-### 2. 把官方事件映射到统一事件
+## 3. 明确审批模型
 
-新增 provider 应尽量映射到统一语义事件：
+这是最重要的扩展决策之一。
 
-- `session.started`
-- `session.ended`
-- `turn.input_submitted`
-- `turn.completed`
-- `tool.pending`
-- `tool.started`
-- `tool.completed`
-- `tool.failed`
-- `permission.requested`
-- `notification`
+你必须真实选择以下其中一种：
 
-如果该 provider 存在审批流，它的 capability descriptor 也要显式声明 approval model。
+- 应用内审批
+- 终端确认，应用只展示状态
+- provider 自己管理审批，应用只做有限展示
+- 没有审批面
 
-### 3. 定义审批行为
+不要把终端确认硬伪装成原生 app 审批。
 
-你需要明确三件事：
+当前参考：
 
-- 哪个官方事件触发审批
-- 审批模式是 native、terminal-backed 还是 unsupported
-- 如何把 allow / deny 转成该 provider 官方要求的响应 JSON
+- Codex 是“终端内确认，应用展示等待状态”
+- Claude 是“应用内审批”
 
-注意：响应格式仍然必须是 provider 专属的。共享的是 unified action，而不是官方回包格式。
-
-### 4. 添加安装和修复逻辑
+## 4. 添加 Hook Plugin 与 Capabilities
 
 更新：
 
@@ -98,86 +99,153 @@ bridge-rs/src/adapter/provider_template.rs.example
 AgentIsland/Services/Hooks/AgentHookPlugin.swift
 ```
 
-需要处理：
+需要定义：
 
-- 新插件的注册
-- 官方 hook 事件配置
-- install / repair / uninstall
-- capability 元数据
+- availability detection
+- install / repair / uninstall 行为
+- derived bridge profile 行为
+- supported events
+- approval source
+- 是否支持 transcript history
+- 是否支持 permission decisions
 
-### 5. 接入 Swift runtime
+目标是让 provider 通过 capability 把行为说清楚，而不是让产品层大量写死 provider 名字。
 
-必要时更新智能体枚举和能力定义，但 Swift 业务逻辑仍应优先围绕统一协议。
+## 5. 扩展 Agent 模型
 
-重点文件：
+只在确有必要时更新这些共享模型入口：
 
 - `AgentIsland/Models/AgentPlatform.swift`
 - `AgentIsland/Services/Hooks/AgentPermissionAdapter.swift`
-- `AgentIsland/Services/Hooks/HookSocketServer.swift`
 - `AgentIsland/Models/UnifiedAgentProtocol.swift`
 
-### 6. 正确使用 provider payload
+这些改动要尽量克制。
 
-provider payload 是 provider 专属信息的透传位。
+如果某个字段只对单一 provider 有意义，先放在 adapter metadata 里，不要过早升格成全局模型字段。
 
-适合放进去的内容：
+## 6. 接入 Transcript 支持
 
-- 官方事件元数据
-- matcher 名称
-- 命令文本
-- 升权提示
-- provider 专属调试字段
+如果 provider 有持久 transcript 或事件日志，就通过下面入口接入：
 
-不应该放进去的内容：
+```text
+AgentIsland/Services/Session/SessionTranscriptProvider.swift
+```
 
-- 规范化后的业务语义
-- 统一审批状态
-- 已经属于稳定字段的核心信息
+必要时再扩展：
 
-### 7. 添加测试
+```text
+AgentIsland/Services/Session/ConversationParser.swift
+```
 
-至少补两类测试：
+Transcript 支持最好覆盖：
 
-#### 事件映射测试
+- 初始历史加载
+- 增量同步
+- 会话元数据
+- tool result 恢复
+- 大 tool 输出的懒加载详情
 
-在 `bridge-rs` 中验证：
+如果 provider 没有 transcript，就把这个限制显式保留，不要伪造历史能力。
 
-- 原始官方事件名被保留
-- unified event kind 正确
-- capability 相关 approval metadata 正确
-- 关键 provider payload 字段存在
+## 7. 接通 Runtime State 对账
 
-#### 权限响应测试
+共享运行时最终都会流进：
+
+```text
+AgentIsland/Services/State/SessionStore.swift
+```
+
+新 provider 至少要能和现有 session 模型配合完成：
+
+- tool start / complete
+- approval waiting state
+- interrupted session
+- transcript backfill
+- session summaries
+- 有内存边界的 chat history
+
+尽量让 provider 适配现有 runtime，而不是把 provider 特例塞进核心状态机。
+
+## 8. 校验 Tool Result 行为
+
+当前产品默认只在内存里保留 preview 大小的 tool 输出，完整内容需要时再从 transcript 懒加载。
+
+新 provider 如果有 transcript，最好保持同样行为。
+
+需要检查：
+
+- preview 截断是否正常
+- lazy detail loading 是否可用
+- 超长 tool 输出不会把 chat view 撑爆
+- transcript 缺失时能否优雅降级
+
+## 9. 添加测试
+
+至少补这两类：
+
+### Bridge 测试
 
 验证：
 
-- allow 回包格式
-- deny 回包格式
-- 如果该 provider 允许“无回包”路径，也要覆盖
+- 事件映射
+- approval state 映射
+- permission mode 映射
+- provider 专属 metadata 保留
+- permission response 编码
 
-### 8. 更新文档
+常见位置：
 
-接入新增 provider 后，至少同步更新：
+```text
+bridge-rs/src/dispatcher.rs
+```
+
+### Runtime 测试或验证路径
+
+验证：
+
+- plugin install / repair 路径
+- history load 路径
+- approval 状态渲染
+- 如果支持 transcript，详情懒加载路径
+
+## 10. 更新用户文档
+
+当这个 provider 已经具备可交付形态后，至少更新：
 
 - `README.md`
 - `README.zh.md`
 - `docs/README.md`
 - `docs/README.zh.md`
-- `docs/agent-extension-guide.zh.md`
+- 当前这份扩展指南
+- 如果需要，再更新架构类文档中的 provider 示例
 
-建议至少写清楚：
+至少写清楚：
 
-- 官方 hook 入口
-- 审批入口
-- unified 事件映射
+- 接入方式
+- 审批方式
+- 历史方式
 - 当前验证状态
 
-## 推荐顺序
+## 实际推荐顺序
 
-1. 新增 Rust adapter
-2. 补 dispatch 测试
-3. 补 permission response 测试
-4. 添加 installer 支持
-5. 接通 Swift runtime
-6. 验证构建
-7. 更新文档
+建议按这个顺序推进：
+
+1. 先确认 provider 官方行为。
+2. 新增 Rust adapter。
+3. 补 bridge tests。
+4. 添加 hook plugin 与 capabilities。
+5. 如果可行，再接 transcript。
+6. 验证 runtime 对账。
+7. 验证大 tool 输出行为。
+8. 更新文档。
+
+## 总结
+
+新增集成时，记住四条原则：
+
+- provider 专属逻辑尽量留在 adapter 附近
+- 运行时语义尽量共享
+- 审批行为必须真实
+- 大历史内容必须有边界
+
+只要新 provider 能守住这四点，就能比较自然地融入 AgentIsland 当前设计。

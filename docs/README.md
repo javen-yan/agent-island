@@ -4,30 +4,24 @@ This directory holds the current architecture, runtime, and integration docs for
 
 ## Start Here
 
-- [Unified Agent Protocol v1](./unified-agent-protocol.md)
-  The primary product-facing protocol for provider translation, capability-based runtime logic, and unified event/action handling.
-- [Multi-Agent Architecture](./multi-agent-architecture.md)
-  The current layered runtime model and the long-term integration direction.
-- [Runtime Observability](./runtime-observability.md)
-  Logging, diagnostics, and bridge-level observability controls.
-- [OpenCode Integration Plan](./opencode-integration-plan.md)
-  The official-doc-based plan for integrating OpenCode as a future provider.
+- [Current Product Overview](./current-product-overview.md)
+  The fastest way to understand what AgentIsland does today, how sessions flow through the runtime, and where recent design changes landed.
 - [Agent Extension Guide](./agent-extension-guide.md)
-  The guide for adding a new provider through the unified runtime.
-- [Agent Integration Checklist](./agent-integration-checklist.md)
-  A practical implementation checklist for adding the next provider.
-- [Design Refresh Checklist](./design-refresh-checklist.md)
-  The implementation checklist for the current docs, logging, icon, and planning refresh.
+  A current, implementation-oriented guide for adding another provider through the shared runtime.
+- [Unified Agent Protocol v1](./unified-agent-protocol.md)
+  The shared runtime contract for provider translation, capability-driven behavior, and unified event semantics.
+- [Multi-Agent Architecture](./multi-agent-architecture.md)
+  The layered model across provider hooks, bridge adapters, runtime state, and UI.
+- [Runtime Observability](./runtime-observability.md)
+  Logging, diagnostics, and runtime support directories.
 
 ## Recommended Reading Order
 
-1. Read the [Unified Agent Protocol v1](./unified-agent-protocol.md) to understand the current product-facing contract and runtime shape.
-2. Read the [Multi-Agent Architecture](./multi-agent-architecture.md) to understand the layering model.
-3. Read the [Runtime Observability](./runtime-observability.md) to understand diagnostics and bridge logging.
-4. Use the [Agent Extension Guide](./agent-extension-guide.md) to understand the provider layering model.
-5. Use the [Agent Integration Checklist](./agent-integration-checklist.md) when implementing a new provider.
-6. Read the [OpenCode Integration Plan](./opencode-integration-plan.md) for the current next-provider planning reference.
-7. Use the [Design Refresh Checklist](./design-refresh-checklist.md) to track the current polish pass.
+1. Read the [Current Product Overview](./current-product-overview.md) for the real implemented shape.
+2. Read the [Multi-Agent Architecture](./multi-agent-architecture.md) for the system layering model.
+3. Read the [Unified Agent Protocol v1](./unified-agent-protocol.md) for the shared runtime contract.
+4. Read the [Runtime Observability](./runtime-observability.md) for diagnostics and support paths.
+5. Read the [Agent Extension Guide](./agent-extension-guide.md) when wiring a new provider.
 
 ## Related Entry Points
 

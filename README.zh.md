@@ -4,99 +4,98 @@
   <p align="center">
     面向 Claude、Codex 和 Gemini 会话的 macOS 菜单栏助手。
     <br>
-    将权限审批、会话可见性和工具时间线统一到一个入口。
+    将运行态可见性、审批状态和会话历史统一到一个入口。
   </p>
   <p align="center">
     <a href="https://github.com/javen-yan/agent-island/releases/latest" target="_blank" rel="noopener noreferrer">
       <img src="https://img.shields.io/github/v/release/javen-yan/agent-island?style=rounded&color=white&labelColor=000000&label=release" alt="最新版本">
     </a>
-    <a href="#" target="_blank" rel="noopener noreferrer">
-      <img alt="下载次数" src="https://img.shields.io/github/downloads/javen-yan/agent-island/total?style=rounded&color=white&labelColor=000000">
+    <a href="https://javen-yan.github.io/agent-island/appcast.xml" target="_blank" rel="noopener noreferrer">
+      <img alt="Sparkle Appcast" src="https://img.shields.io/badge/appcast-Sparkle-white?style=rounded&labelColor=000000">
     </a>
   </p>
 </div>
 
-[英文文档](./README.md)
+[English README](./README.md)
 
 更多文档入口见：[文档索引](./docs/README.zh.md)
 
-## 项目简介
+## 它是什么
 
-AgentIsland 是一个面向终端 AI 智能体的 macOS 菜单栏应用，用来把会话里的关键信息收敛到统一入口，尽量减少“在终端、编辑器、审批弹窗之间来回跳”的成本。
+AgentIsland 是一个面向终端 AI agent 的 macOS 菜单栏应用。它把会话状态、工具执行、审批状态和最近对话历史收拢到一个统一界面里，减少你在多个终端窗口之间来回切换的成本。
 
-它当前主要解决三类问题：
-
-- 权限审批
-- 工具执行状态
-- 会话列表
-- 会话历史
-- 运行态透视
-
-当前重点支持：
+当前支持：
 
 - Claude
 - Codex
 - Gemini
 
-三者都按各自官方 hooks 协议接入，但在进入 UI 之前会先映射到 AgentIsland 的内部稳定协议。
+## 当前产品设计
+
+现在的 AgentIsland 已经围绕一套共享运行时组织起来：
+
+- 各家 agent 的 hooks 和 transcript 先经过 provider adapter 接入。
+- Rust bridge 会把 provider 事件规整成稳定的内部载荷。
+- Swift 运行时以 `SessionStore`、`SessionTranscriptProvider` 和统一事件处理为中心。
+- UI 不再按 agent 分裂成几套独立产品流，而是渲染同一个共享 session 模型。
+
+几个当前已经落地的重要行为：
+
+- Claude 走应用内审批，并使用 transcript 回填历史。
+- Codex 的终端确认会在应用里显示等待状态，但实际确认仍在终端里完成。
+- Codex 危险命令确认支持“内建规则 + 用户自定义 regex 扩展”。
+- 超长 tool 输出默认只在内存里保留 preview，需要时再从 transcript 懒加载完整内容。
 
 ## 当前能力
 
-- 菜单栏入口和展开式面板
+- 菜单栏 / Notch 入口
 - 多会话展示
 - 工具执行时间线
-- 权限审批闭环
-- 会话历史查看
-- Hook 安装、修复、重新分发
-- 内部协议层：`internal_event`、`permission_mode`、`extra`
+- 统一审批状态
+- transcript 驱动的历史视图
+- 大 tool 输出懒加载详情
+- Hook 安装、修复与 bridge 重新分发
+- bridge 与 app 的诊断日志控制
+- Sparkle 发布与 appcast 发布链路
 
 ## 当前支持矩阵
 
-| Agent | 官方 hook 入口 | 当前审批入口 | 内部审批事件 | 状态 |
+| Agent | 接入方式 | 审批方式 | 历史方式 | 状态 |
 | --- | --- | --- | --- | --- |
-| Claude | Claude Code hooks | `PermissionRequest` | `permission_requested` | 已验证 |
-| Codex | Codex hooks | `PreToolUse` (`Bash`) | `permission_requested` | 已验证 |
-| Gemini | Gemini hooks | `BeforeTool` | `permission_requested` | 已接入，建议继续扩大验证 |
+| Claude | 官方 hooks + JSONL transcript 解析 | 应用内审批 | transcript 回填 | 已验证 |
+| Codex | 官方 hooks + transcript 解析 | 终端确认，应用只展示状态 | transcript 回填 | 已验证 |
+| Gemini | 官方 hooks + bridge adapter | provider 驱动审批 | 运行时集成 | 已接入 |
 
 ## 架构概览
 
-AgentIsland 当前采用三层模型：
+当前 AgentIsland 可以按四层来理解：
 
-1. 官方协议层
-   Claude / Codex / Gemini 各自按官方 hooks 协议触发事件。
+1. Provider 层
+   Claude、Codex、Gemini 各自保留官方 hook 语义。
 
-2. 内部协议层
-   Rust bridge 会把官方事件映射成统一 `HookPayload`，其中稳定字段是：
-   - `internal_event`
-   - `permission_mode`
-   - `extra`
+2. Bridge 层
+   `bridge-rs` 负责把 provider 原生事件映射成稳定运行时载荷。
 
-3. UI / 状态层
-   Swift 运行时和 UI 优先消费内部协议，不直接依赖三家官方事件名。
+3. Runtime 层
+   Swift 服务负责 session、transcript 同步、审批、工具状态和有内存边界的历史管理。
 
-核心原则：
+4. UI 层
+   Notch、聊天视图、会话列表和设置页都消费共享运行时状态。
 
-- 官方差异留在适配器层
-- UI 交互逻辑尽量固定
-- 智能体特有细节通过 `extra` 透传
+建议先看这些文档：
 
-## 文档导航
-
-- [文档索引](./docs/README.zh.md)
-- [内部 Hook 协议（英文）](./docs/internal-hook-protocol.md)
-- [内部 Hook 协议（中文）](./docs/internal-hook-protocol.zh.md)
-- [多 Agent 架构草案（英文）](./docs/multi-agent-architecture.md)
-- [多 Agent 架构草案（中文）](./docs/multi-agent-architecture.zh.md)
-- [Agent 扩展指南（英文）](./docs/agent-extension-guide.md)
-- [Agent 扩展指南（中文）](./docs/agent-extension-guide.zh.md)
-- [终端交互指南（英文）](./docs/terminal-interaction.md)
-- [终端交互指南（中文）](./docs/terminal-interaction.zh.md)
+- [当前产品总览](./docs/current-product-overview.zh.md)
+- [统一 Agent 协议 v1](./docs/unified-agent-protocol.zh.md)
+- [多 Agent 架构](./docs/multi-agent-architecture.zh.md)
+- [运行时可观测性](./docs/runtime-observability.zh.md)
 
 ## 快速开始
 
 ### 依赖
 
 - macOS 15.6+
+- Xcode 17+
+- Rust toolchain
 - Claude Code CLI
 - 可选：Codex CLI、Gemini CLI
 
@@ -106,33 +105,39 @@ AgentIsland 当前采用三层模型：
 ./scripts/build.sh
 ```
 
-默认会构建 app 和 Rust bridge，并完成打包。
-
-### CI 产物
-
-`main` 与 `v*` 标签会触发自动构建流程：
-
-- 编译 Rust bridge
-- 构建 `Agent Island.app`
-- 将 `agent-island-bridge` 打入 App Bundle
-- 打包 dmg / zip
-- 标签发布时自动创建 Release
-
-修复或首次安装时，应用会优先使用应用包内的 bridge，再分发到：
-
-```bash
-~/.agent-island/hooks/agent-island-bridge
-```
-
-本地如需跳过签名：
+本地跳过签名：
 
 ```bash
 AGENT_ISLAND_NO_SIGN=1 ./scripts/build.sh
 ```
 
+### 本地发布构建
+
+```bash
+./scripts/create-release.sh
+```
+
+这会打包 app、准备 Sparkle 产物，并让本地发布行为和 CI 保持一致。
+
+## 发布流程
+
+现在 tag 发布会通过 GitHub Actions 自动产出发布内容，并保留 appcast 历史，而不是每次只覆盖成单条记录。
+
+当前发布链路包含：
+
+- 构建 app 和 bundled bridge
+- 打包 dmg / zip
+- 发布 GitHub Release 资产
+- 重新生成并合并 Sparkle `appcast.xml`
+- 部署 appcast 到 GitHub Pages
+
+相关地址：
+
+- [GitHub appcast](https://javen-yan.github.io/agent-island/appcast.xml)
+
 ## 调试与排查
 
-查看日志：
+查看 app 日志：
 
 ```bash
 log stream --level debug --predicate 'subsystem == "com.agentisland"'
@@ -146,43 +151,21 @@ log stream --level debug --predicate 'subsystem == "com.agentisland" AND categor
 
 常见排查点：
 
-- Codex 返回 `invalid pre-tool-use JSON output`
-  - 检查 `hookSpecificOutput.permissionDecision`
-  - 确认 bridge 为最新版本
+- 如果 Codex 审批看起来卡住，先确认 CLI 是否还在等待终端确认。
+- 如果某个 session 明显吃内存，先看是不是包含很多超长 tool 输出，再确认懒加载是否按预期工作。
+- 如果 app 状态和 provider 行为不一致，先看 bridge 日志，再往 UI 层排查。
+- 如果发布元数据不对，连同 tag 版本、Xcode 版本号和生成出的 appcast 一起核对。
 
-- UI 状态与官方事件不一致
-  - 先看 `internal_event`
-  - 再看 `permission_mode`
-  - 最后再回看原始 `event` 和 `extra`
+## 仓库结构
 
-- 审批卡死
-  - 检查 `HookSocketServer` pending permission 是否泄漏
-
-- 新接入 agent 后 UI 没反应
-  - 先检查 bridge 载荷是否包含 `internal_event`
-  - 再对照 [内部 Hook 协议](./docs/internal-hook-protocol.zh.md) 和 [Agent 扩展指南（中文）](./docs/agent-extension-guide.zh.md)
-
-## 安全
-
-- 权限决策通过本地 socket 回传
-- 不依赖云端审批同步
-- README 不默认记录会话正文
-
-当前统计项：
-
-- `App Launched`
-- `Session Started`
-
-## 目录
-
-- `AgentIsland/`: macOS App 主体
+- `AgentIsland/`: macOS app
 - `bridge-rs/`: Rust bridge runtime
-- `docs/`: 架构、协议、扩展文档
-- `scripts/`: 构建与发布脚本
+- `docs/`: 架构、运行时与集成文档
+- `scripts/`: 构建、打包、发布脚本
 
 ## 致谢
 
-本项目基于 [farouqaldori/claude-island](https://github.com/farouqaldori/claude-island) 演化而来，保留并扩展了其桥接与通知思路。
+本项目基于 [farouqaldori/claude-island](https://github.com/farouqaldori/claude-island) 演化而来，并在其桥接与通知思路上扩展成更通用的多 agent 运行时。
 
 ## License
 
