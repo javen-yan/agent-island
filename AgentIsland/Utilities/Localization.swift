@@ -87,6 +87,8 @@ enum L10nKey: String {
     case settingsGeneralPermissionsSubtitle
     case settingsGeneralIslandDisplay
     case settingsGeneralAttentionSound
+    case settingsGeneralChatHistoryRetention
+    case settingsGeneralChatHistoryRetentionSubtitle
     case settingsGeneralLaunchAtLogin
     case settingsGeneralAccessibility
     case settingsLanguage
@@ -105,6 +107,14 @@ enum L10nKey: String {
     case settingsAgentsMonitoringOnly
     case settingsAgentsClaudeDescription
     case settingsAgentsCodexDescription
+    case settingsAgentsCodexSafetyTitle
+    case settingsAgentsCodexSafetySubtitle
+    case settingsAgentsCodexBuiltInPatterns
+    case settingsAgentsCodexBuiltInPatternsSubtitle
+    case settingsAgentsCodexCustomPatterns
+    case settingsAgentsCodexCustomPatternsSubtitle
+    case settingsAgentsCodexApplyPatterns
+    case settingsAgentsCodexResetPatterns
     case settingsAgentsGeminiDescription
     case settingsDiagnosticsLoggingTitle
     case settingsDiagnosticsLoggingSubtitle
@@ -132,6 +142,7 @@ enum L10nKey: String {
     case settingsToastRepairFailedAgent
     case settingsToastRepairedAgent
     case settingsToastRemovedApprovalRule
+    case settingsToastCodexPatternsSaved
     case settingsVersionFormat
     case settingsRepairIntegration
     case settingsApprovalRulesEmptyTitle
@@ -236,6 +247,8 @@ enum L10n {
         .settingsGeneralPermissionsSubtitle: [.english: "Accessibility is required for direct session control.", .simplifiedChinese: "辅助功能权限用于会话直接控制。"],
         .settingsGeneralIslandDisplay: [.english: "Display", .simplifiedChinese: "显示器"],
         .settingsGeneralAttentionSound: [.english: "Attention Sound", .simplifiedChinese: "提醒声音"],
+        .settingsGeneralChatHistoryRetention: [.english: "Chat History Limit", .simplifiedChinese: "对话保留条数"],
+        .settingsGeneralChatHistoryRetentionSubtitle: [.english: "Only keep the most recent messages in memory.", .simplifiedChinese: "仅在内存中保留最近的消息。"],
         .settingsGeneralLaunchAtLogin: [.english: "Launch at Login", .simplifiedChinese: "登录时启动"],
         .settingsGeneralAccessibility: [.english: "Accessibility", .simplifiedChinese: "辅助功能"],
         .settingsLanguage: [.english: "Language", .simplifiedChinese: "语言"],
@@ -254,6 +267,14 @@ enum L10n {
         .settingsAgentsMonitoringOnly: [.english: "Monitoring only", .simplifiedChinese: "仅观察"],
         .settingsAgentsClaudeDescription: [.english: "Full hook integration with approvals, history, and runtime control.", .simplifiedChinese: "完整 hook 集成，包含审批、历史和运行时控制。"],
         .settingsAgentsCodexDescription: [.english: "Bash-only monitoring that expands the island after each response and keeps follow-up lightweight inside the island.", .simplifiedChinese: "仅观察 Bash，会在每轮完成后自动展开 Island，并在 Island 内保持轻量后续交互。"],
+        .settingsAgentsCodexSafetyTitle: [.english: "Codex Command Confirmation", .simplifiedChinese: "Codex 命令确认"],
+        .settingsAgentsCodexSafetySubtitle: [.english: "Built-in terminal confirmation rules are always included. Add your own regex patterns to extend them.", .simplifiedChinese: "内建的终端确认规则会始终生效，你也可以继续添加自己的正则规则扩展它们。"],
+        .settingsAgentsCodexBuiltInPatterns: [.english: "Built-in Patterns", .simplifiedChinese: "内建规则"],
+        .settingsAgentsCodexBuiltInPatternsSubtitle: [.english: "These regex patterns are written into the Codex bridge profile automatically.", .simplifiedChinese: "这些正则规则会自动写入 Codex bridge profile。"],
+        .settingsAgentsCodexCustomPatterns: [.english: "Custom Regex Patterns", .simplifiedChinese: "自定义正则规则"],
+        .settingsAgentsCodexCustomPatternsSubtitle: [.english: "One regex per line. They are merged with the built-ins and applied on the next profile refresh.", .simplifiedChinese: "每行一条正则。它们会和内建规则合并，并在下次 profile 刷新时生效。"],
+        .settingsAgentsCodexApplyPatterns: [.english: "Apply", .simplifiedChinese: "应用"],
+        .settingsAgentsCodexResetPatterns: [.english: "Reset", .simplifiedChinese: "重置"],
         .settingsAgentsGeminiDescription: [.english: "Hook integration with approvals and direct interaction support.", .simplifiedChinese: "支持审批与直接交互的 hook 集成。"],
         .settingsDiagnosticsLoggingTitle: [.english: "Logging", .simplifiedChinese: "日志"],
         .settingsDiagnosticsLoggingSubtitle: [.english: "Bridge and app logs help diagnose runtime issues.", .simplifiedChinese: "Bridge 和应用日志可用于诊断运行时问题。"],
@@ -281,6 +302,7 @@ enum L10n {
         .settingsToastRepairFailedAgent: [.english: "Repair failed for %@: %@", .simplifiedChinese: "修复 %@ 失败：%@"],
         .settingsToastRepairedAgent: [.english: "Repaired %@", .simplifiedChinese: "已修复 %@"],
         .settingsToastRemovedApprovalRule: [.english: "Removed approval rule", .simplifiedChinese: "已删除审批规则"],
+        .settingsToastCodexPatternsSaved: [.english: "Saved Codex command confirmation patterns", .simplifiedChinese: "已保存 Codex 命令确认规则"],
         .settingsVersionFormat: [.english: "Version %@ (%@)", .simplifiedChinese: "版本 %@（%@）"],
         .settingsRepairIntegration: [.english: "Repair Integration", .simplifiedChinese: "修复集成"],
         .settingsApprovalRulesEmptyTitle: [.english: "No Saved Approval Rules", .simplifiedChinese: "暂无已保存审批规则"],

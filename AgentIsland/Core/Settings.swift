@@ -99,6 +99,7 @@ enum AppSettings {
         static let appLogEnabled = "appLogEnabled"
         static let appLogLevel = "appLogLevel"
         static let appLanguage = "appLanguage"
+        static let chatHistoryRetentionLimit = "chatHistoryRetentionLimit"
     }
 
     // MARK: - Notification Sound
@@ -118,6 +119,27 @@ enum AppSettings {
     }
 
     // MARK: - Codex Hook Safety
+
+    static let codexBuiltInDangerousCommands: [String] = [
+        "rm",
+        "sudo",
+        "su",
+        "dd",
+        "mkfs",
+        "diskutil",
+        "shutdown",
+        "reboot",
+        "halt",
+        "chmod",
+        "chown"
+    ]
+
+    static var codexBuiltInDangerousCommandPatterns: [String] {
+        codexBuiltInDangerousCommands.map { command in
+            let escaped = NSRegularExpression.escapedPattern(for: command)
+            return #"^\s*["']?"# + escaped + #"(?:\s|$)"#
+        }
+    }
 
     /// Additional regex patterns that should trigger Codex PreToolUse confirmation.
     /// These are merged with the built-in dangerous command patterns.
@@ -220,6 +242,19 @@ enum AppSettings {
         }
     }
 
+    static var chatHistoryRetentionLimit: Int {
+        get {
+            let storedValue = defaults.integer(forKey: Keys.chatHistoryRetentionLimit)
+            if storedValue == 0 && defaults.object(forKey: Keys.chatHistoryRetentionLimit) == nil {
+                return 50
+            }
+            return normalizedChatHistoryRetentionLimit(storedValue)
+        }
+        set {
+            defaults.set(normalizedChatHistoryRetentionLimit(newValue), forKey: Keys.chatHistoryRetentionLimit)
+        }
+    }
+
     nonisolated static func appLanguageSnapshot() -> AppLanguage {
         let defaults = UserDefaults.standard
         guard let rawValue = defaults.string(forKey: "appLanguage"),
@@ -254,6 +289,16 @@ enum AppSettings {
         )
     }
 
+    nonisolated static func chatHistoryRetentionLimitSnapshot() -> Int {
+        let defaults = UserDefaults.standard
+        let key = "chatHistoryRetentionLimit"
+        let storedValue = defaults.integer(forKey: key)
+        if storedValue == 0 && defaults.object(forKey: key) == nil {
+            return 50
+        }
+        return min(max(storedValue, 10), 500)
+    }
+
     private static func normalizedCodexDangerousCommandPatterns(_ patterns: [String]) -> [String] {
         let cleaned = patterns
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -261,5 +306,9 @@ enum AppSettings {
             .filter { codexDangerousCommandPatternIssue(for: $0) == nil }
 
         return Array(NSOrderedSet(array: cleaned)) as? [String] ?? cleaned
+    }
+
+    private static func normalizedChatHistoryRetentionLimit(_ value: Int) -> Int {
+        min(max(value, 10), 500)
     }
 }

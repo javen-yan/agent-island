@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use crate::protocol::{BridgeProfile, PermissionDecision};
 
 use super::{
-    default_extra_payload, first_string, get_first_string_opt,
+    default_extra_payload, default_requires_approval, first_string, get_first_string_opt,
     normalize_event_name, normalize_input_with_options,
     log_unsupported_action_fields, BridgeCapabilities, NormalizedInput, NormalizedInputOptions, PermissionCapability,
     ProcessInfo, SourceAdapter,
@@ -18,7 +18,7 @@ use super::{
     INTERNAL_EVENT_SESSION_ENDED, INTERNAL_EVENT_SESSION_STARTED,
     INTERNAL_EVENT_STOPPED, INTERNAL_EVENT_SUBAGENT_STOPPED, INTERNAL_EVENT_TOOL_DID_RUN,
     INTERNAL_EVENT_TOOL_WILL_RUN, INTERNAL_EVENT_UNKNOWN,
-    INTERNAL_EVENT_USER_PROMPT_SUBMITTED, PERMISSION_MODE_NATIVE_APP,
+    INTERNAL_EVENT_USER_PROMPT_SUBMITTED,
 };
 
 pub struct CodexAdapter;
@@ -131,8 +131,7 @@ impl SourceAdapter for CodexAdapter {
     }
 
     fn requires_approval(&self, profile: &BridgeProfile, normalized: &NormalizedInput) -> bool {
-        let _ = (profile, normalized);
-        false
+        default_requires_approval(profile, normalized)
     }
 
     fn internal_event(
@@ -164,10 +163,8 @@ impl SourceAdapter for CodexAdapter {
         status: &str,
     ) -> Option<String> {
         if status == HOOK_STATUS_WAITING_FOR_APPROVAL {
-            if codex_requires_terminal_confirmation(normalized) {
-                return Some("terminal".to_string());
-            }
-            return Some(PERMISSION_MODE_NATIVE_APP.to_string());
+            let _ = normalized;
+            return Some("terminal".to_string());
         }
 
         None
@@ -273,7 +270,7 @@ fn codex_requires_terminal_confirmation(normalized: &NormalizedInput) -> bool {
 
     matches!(
         first.as_str(),
-        "rm" | "sudo" | "su" | "dd" | "mkfs" | "diskutil" | "shutdown" | "reboot" | "halt"
+        "rm" | "sudo" | "su" | "dd" | "mkfs" | "diskutil" | "shutdown" | "reboot" | "halt" | "chmod" | "chown"
     )
 }
 

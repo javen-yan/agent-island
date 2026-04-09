@@ -15,6 +15,8 @@ APP_RESOURCES_PATHS=(
     "$APP_IN_EXPORT/Contents/Resources"
 )
 CI_NO_SIGN="${AGENT_ISLAND_NO_SIGN:-0}"
+RELEASE_VERSION="${AGENT_ISLAND_RELEASE_VERSION:-}"
+RELEASE_BUILD_NUMBER="${AGENT_ISLAND_RELEASE_BUILD_NUMBER:-}"
 
 run_xcodebuild() {
     if command -v xcpretty >/dev/null 2>&1; then
@@ -23,6 +25,14 @@ run_xcodebuild() {
         "$@"
     fi
 }
+
+xcode_version_args=()
+if [ -n "$RELEASE_VERSION" ]; then
+    xcode_version_args+=("MARKETING_VERSION=$RELEASE_VERSION")
+fi
+if [ -n "$RELEASE_BUILD_NUMBER" ]; then
+    xcode_version_args+=("CURRENT_PROJECT_VERSION=$RELEASE_BUILD_NUMBER")
+fi
 
 has_developer_id_certificate() {
     security find-identity -p basic -v | grep -q "Developer ID Application"
@@ -60,7 +70,8 @@ if [ "$CI_NO_SIGN" = "1" ]; then
         CODE_SIGNING_REQUIRED=NO \
         CODE_SIGN_IDENTITY="" \
         CODE_SIGNING_KEYCHAIN="" \
-        CONFIGURATION_BUILD_DIR="$UNSIGNED_BUILD_DIR"
+        CONFIGURATION_BUILD_DIR="$UNSIGNED_BUILD_DIR" \
+        "${xcode_version_args[@]}"
 
     if [ ! -d "$UNSIGNED_BUILD_DIR/Agent Island.app" ]; then
         echo "ERROR: Unsigned app not found at $UNSIGNED_BUILD_DIR/Agent Island.app"
@@ -116,7 +127,8 @@ if ! has_developer_id_certificate; then
         CODE_SIGNING_REQUIRED=NO \
         CODE_SIGN_IDENTITY="" \
         CODE_SIGNING_KEYCHAIN="" \
-        CONFIGURATION_BUILD_DIR="$UNSIGNED_BUILD_DIR"
+        CONFIGURATION_BUILD_DIR="$UNSIGNED_BUILD_DIR" \
+        "${xcode_version_args[@]}"
 
     if [ ! -d "$UNSIGNED_BUILD_DIR/Agent Island.app" ]; then
         echo "ERROR: Unsigned app not found at $UNSIGNED_BUILD_DIR/Agent Island.app"
@@ -133,7 +145,8 @@ else
         -archivePath "$ARCHIVE_PATH" \
         -destination "generic/platform=macOS" \
         ENABLE_HARDENED_RUNTIME=YES \
-        CODE_SIGN_STYLE=Automatic
+        CODE_SIGN_STYLE=Automatic \
+        "${xcode_version_args[@]}"
 
     # Create ExportOptions.plist if it doesn't exist
     EXPORT_OPTIONS="$BUILD_DIR/ExportOptions.plist"

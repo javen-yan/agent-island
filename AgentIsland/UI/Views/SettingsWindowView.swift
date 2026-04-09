@@ -151,12 +151,19 @@ final class AgentIslandSettingsViewModel: ObservableObject {
     @Published var launchAtLogin = false
     @Published var pluginSummaries: [AgentHookPluginSummary] = []
     @Published var approvalRules: [ApprovalRule] = []
+    @Published var codexBuiltInDangerousCommandPatterns: [String] = AppSettings.codexBuiltInDangerousCommandPatterns
+    @Published var codexDangerousCommandPatterns: [String] = AppSettings.codexDangerousCommandPatterns
+    @Published var codexDangerousCommandPatternsDraft: String = AppSettings.codexDangerousCommandPatterns.joined(separator: "\n")
+    @Published var codexDangerousCommandPatternValidationMessage: String?
+    @Published var codexDangerousCommandPatternStatusMessage: String?
+    @Published var codexDangerousCommandPatternStatusIsError = false
     @Published var bridgeLogEnabled: Bool = AppSettings.bridgeLogEnabled
     @Published var bridgeLogLevel: BridgeLogLevel = AppSettings.bridgeLogLevel
     @Published var appLogEnabled: Bool = AppSettings.appLogEnabled
     @Published var appLogLevel: BridgeLogLevel = AppSettings.appLogLevel
     @Published var selectedSound: NotificationSound = AppSettings.notificationSound
     @Published var selectedLanguage: AppLanguage = AppSettings.appLanguage
+    @Published var chatHistoryRetentionLimit: Int = AppSettings.chatHistoryRetentionLimit
     @Published var selectedScreenOptionID: String = AgentSettingsScreenOption.automatic.id
     @Published var screenOptions: [AgentSettingsScreenOption] = [.automatic]
 
@@ -201,6 +208,54 @@ final class AgentIslandSettingsViewModel: ObservableObject {
     func setAppLanguage(_ language: AppLanguage) {
         facade.setAppLanguage(language)
         selectedLanguage = language
+    }
+
+    func setChatHistoryRetentionLimit(_ limit: Int) {
+        facade.setChatHistoryRetentionLimit(limit)
+        chatHistoryRetentionLimit = AppSettings.chatHistoryRetentionLimit
+    }
+
+    func saveCodexDangerousCommandPatternsDraft() {
+        let patterns = codexDangerousCommandPatternsDraft
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let issues = patterns.compactMap { pattern -> String? in
+            guard let issue = AppSettings.codexDangerousCommandPatternIssue(for: pattern) else {
+                return nil
+            }
+            return "`\(pattern)` - \(issue)"
+        }
+
+        guard issues.isEmpty else {
+            codexDangerousCommandPatternValidationMessage = issues.joined(separator: "\n")
+            codexDangerousCommandPatternStatusMessage = nil
+            codexDangerousCommandPatternStatusIsError = true
+            return
+        }
+
+        switch facade.setCodexDangerousCommandPatterns(patterns) {
+        case .success(let message):
+            codexDangerousCommandPatternStatusMessage = message
+            codexDangerousCommandPatternStatusIsError = false
+        case .failure(let message):
+            codexDangerousCommandPatternStatusMessage = message
+            codexDangerousCommandPatternStatusIsError = true
+        case .none:
+            codexDangerousCommandPatternStatusMessage = nil
+            codexDangerousCommandPatternStatusIsError = false
+        }
+        codexDangerousCommandPatterns = AppSettings.codexDangerousCommandPatterns
+        codexDangerousCommandPatternsDraft = codexDangerousCommandPatterns.joined(separator: "\n")
+        codexDangerousCommandPatternValidationMessage = nil
+    }
+
+    func resetCodexDangerousCommandPatternsDraft() {
+        codexDangerousCommandPatternsDraft = codexDangerousCommandPatterns.joined(separator: "\n")
+        codexDangerousCommandPatternValidationMessage = nil
+        codexDangerousCommandPatternStatusMessage = nil
+        codexDangerousCommandPatternStatusIsError = false
     }
 
     func togglePlugin(_ summary: AgentHookPluginSummary) {
@@ -293,12 +348,19 @@ final class AgentIslandSettingsViewModel: ObservableObject {
         launchAtLogin = snapshot.launchAtLogin
         pluginSummaries = snapshot.pluginSummaries
         approvalRules = snapshot.approvalRules
+        codexBuiltInDangerousCommandPatterns = snapshot.codexBuiltInDangerousCommandPatterns
+        codexDangerousCommandPatterns = snapshot.codexDangerousCommandPatterns
+        codexDangerousCommandPatternsDraft = snapshot.codexDangerousCommandPatterns.joined(separator: "\n")
+        codexDangerousCommandPatternValidationMessage = nil
+        codexDangerousCommandPatternStatusMessage = nil
+        codexDangerousCommandPatternStatusIsError = false
         bridgeLogEnabled = snapshot.bridgeLogEnabled
         bridgeLogLevel = snapshot.bridgeLogLevel
         appLogEnabled = snapshot.appLogEnabled
         appLogLevel = snapshot.appLogLevel
         selectedSound = snapshot.selectedSound
         selectedLanguage = snapshot.selectedLanguage
+        chatHistoryRetentionLimit = snapshot.chatHistoryRetentionLimit
         selectedScreenOptionID = snapshot.selectedScreenOptionID
         screenOptions = snapshot.screenOptions
     }
@@ -1040,6 +1102,21 @@ private struct GeneralSettingsPane: View {
 
                 SettingsDivider()
 
+                SettingsRow(icon: "text.bubble", iconColor: .teal, title: L10n.text(.settingsGeneralChatHistoryRetention), description: L10n.text(.settingsGeneralChatHistoryRetentionSubtitle)) {
+                    Picker("", selection: $viewModel.chatHistoryRetentionLimit) {
+                        ForEach([25, 50, 100, 200, 500], id: \.self) { limit in
+                            Text("\(limit)").tag(limit)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: settingsPickerWidth, alignment: .trailing)
+                    .onChange(of: viewModel.chatHistoryRetentionLimit) { _, newValue in
+                        viewModel.setChatHistoryRetentionLimit(newValue)
+                    }
+                }
+
+                SettingsDivider()
+
                 SettingsRow(icon: "power", iconColor: .green, title: L10n.text(.settingsGeneralLaunchAtLogin), description: nil) {
                     Toggle("", isOn: Binding(
                         get: { viewModel.launchAtLogin },
@@ -1141,6 +1218,75 @@ private struct AgentHooksSettingsPane: View {
                     }
                 }
             }
+
+            SettingsSectionBlock(
+                title: L10n.text(.settingsAgentsCodexSafetyTitle),
+                subtitle: L10n.text(.settingsAgentsCodexSafetySubtitle),
+                chromeStyle: .plain
+            ) {
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(L10n.text(.settingsAgentsCodexBuiltInPatterns))
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.primary)
+
+                        Text(L10n.text(.settingsAgentsCodexBuiltInPatternsSubtitle))
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+
+                        ReadOnlyPatternList(patterns: viewModel.codexBuiltInDangerousCommandPatterns)
+                    }
+
+                    SettingsDivider()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(L10n.text(.settingsAgentsCodexCustomPatterns))
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.primary)
+
+                        Text(L10n.text(.settingsAgentsCodexCustomPatternsSubtitle))
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+
+                        TextEditor(text: $viewModel.codexDangerousCommandPatternsDraft)
+                            .font(.system(size: 12, design: .monospaced))
+                            .frame(minHeight: 110)
+                            .padding(8)
+                            .background(Color(NSColor.textBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                            )
+
+                        if let validation = viewModel.codexDangerousCommandPatternValidationMessage,
+                           !validation.isEmpty {
+                            Text(validation)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.red)
+                        }
+
+                        HStack(spacing: 10) {
+                            Button(L10n.text(.settingsAgentsCodexApplyPatterns)) {
+                                viewModel.saveCodexDangerousCommandPatternsDraft()
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button(L10n.text(.settingsAgentsCodexResetPatterns)) {
+                                viewModel.resetCodexDangerousCommandPatternsDraft()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
+                        if let status = viewModel.codexDangerousCommandPatternStatusMessage,
+                           !status.isEmpty {
+                            Text(status)
+                                .font(.system(size: 11))
+                                .foregroundColor(viewModel.codexDangerousCommandPatternStatusIsError ? .red : .green)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1175,6 +1321,31 @@ private struct AgentHooksSettingsPane: View {
             parts.append(detail)
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+private struct ReadOnlyPatternList: View {
+    let patterns: [String]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(patterns, id: \.self) { pattern in
+                    Text(pattern)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.primary.opacity(0.82))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(10)
+        }
+        .frame(minHeight: 92, maxHeight: 140)
+        .background(Color(NSColor.textBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
     }
 }
 

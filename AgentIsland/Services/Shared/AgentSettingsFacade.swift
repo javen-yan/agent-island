@@ -33,12 +33,15 @@ struct AgentSettingsSnapshot {
     let launchAtLogin: Bool
     let pluginSummaries: [AgentHookPluginSummary]
     let approvalRules: [ApprovalRule]
+    let codexBuiltInDangerousCommandPatterns: [String]
+    let codexDangerousCommandPatterns: [String]
     let bridgeLogEnabled: Bool
     let bridgeLogLevel: BridgeLogLevel
     let appLogEnabled: Bool
     let appLogLevel: BridgeLogLevel
     let selectedSound: NotificationSound
     let selectedLanguage: AppLanguage
+    let chatHistoryRetentionLimit: Int
     let selectedScreenOptionID: String
     let screenOptions: [AgentSettingsScreenOption]
 }
@@ -95,12 +98,15 @@ final class AgentSettingsFacade {
             launchAtLogin: SMAppService.mainApp.status == .enabled,
             pluginSummaries: pluginManager.pluginSummaries(),
             approvalRules: await approvalPolicyStore.allRules(),
+            codexBuiltInDangerousCommandPatterns: AppSettings.codexBuiltInDangerousCommandPatterns,
+            codexDangerousCommandPatterns: AppSettings.codexDangerousCommandPatterns,
             bridgeLogEnabled: AppSettings.bridgeLogEnabled,
             bridgeLogLevel: AppSettings.bridgeLogLevel,
             appLogEnabled: AppSettings.appLogEnabled,
             appLogLevel: AppSettings.appLogLevel,
             selectedSound: AppSettings.notificationSound,
             selectedLanguage: AppSettings.appLanguage,
+            chatHistoryRetentionLimit: AppSettings.chatHistoryRetentionLimit,
             selectedScreenOptionID: selectedScreenOptionID,
             screenOptions: resolvedScreenOptions(),
         )
@@ -148,6 +154,19 @@ final class AgentSettingsFacade {
 
     func setAppLanguage(_ language: AppLanguage) {
         LocalizationManager.shared.setLanguage(language)
+    }
+
+    func setChatHistoryRetentionLimit(_ limit: Int) {
+        AppSettings.chatHistoryRetentionLimit = limit
+        Task {
+            await SessionStore.shared.applyChatHistoryRetentionToAllSessions()
+        }
+    }
+
+    func setCodexDangerousCommandPatterns(_ patterns: [String]) -> AgentSettingsActionResult {
+        AppSettings.codexDangerousCommandPatterns = patterns
+        pluginManager.refreshBridgeProfilesFromApprovalRules()
+        return .success(L10n.text(.settingsToastCodexPatternsSaved))
     }
 
     func togglePlugin(_ summary: AgentHookPluginSummary) -> AgentSettingsActionResult {

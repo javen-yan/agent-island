@@ -35,8 +35,13 @@ jobs:
       - name: Build (signed for local release, unsigned for CI)
         env:
           AGENT_ISLAND_NO_SIGN: "1"
+          AGENT_ISLAND_RELEASE_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name != '' && github.ref_name || '' }}
+          AGENT_ISLAND_RELEASE_BUILD_NUMBER: ${{ github.run_number }}
         run: |
           chmod +x scripts/*.sh
+          if [[ "$AGENT_ISLAND_RELEASE_VERSION" == v* ]]; then
+            export AGENT_ISLAND_RELEASE_VERSION="${AGENT_ISLAND_RELEASE_VERSION#v}"
+          fi
           ./scripts/build.sh
 
       - name: Package App and DMG

@@ -85,6 +85,8 @@ struct AgentHookCapabilities: Sendable {
             responseMode: responseMode,
             approvalTools: approvalTools,
             approvalCommandPatterns: approvalCommandPatterns,
+            builtInApprovalCommandPatterns: nil,
+            customApprovalCommandPatterns: nil,
             autoApproveTools: [],
             autoApproveCommandPatterns: [],
             bridgeLogEnabled: AppSettings.bridgeLogEnabled,
@@ -98,6 +100,8 @@ struct AgentBridgeProfile: Codable {
     let responseMode: String
     let approvalTools: [String]
     let approvalCommandPatterns: [String]
+    let builtInApprovalCommandPatterns: [String]?
+    let customApprovalCommandPatterns: [String]?
     let autoApproveTools: [String]
     let autoApproveCommandPatterns: [String]
     let bridgeLogEnabled: Bool
@@ -384,12 +388,20 @@ struct HookPluginContext {
         guard let baseProfile = plugin.capabilities.bridgeProfile else { return }
         let autoApproveCommandPatterns = derivedAutoApproveCommandPatterns(for: plugin.agentType, rules: rules)
         let approvalCommandPatterns = derivedApprovalCommandPatterns(for: plugin.agentType, basePatterns: baseProfile.approvalCommandPatterns)
+        let builtInApprovalCommandPatterns = plugin.agentType == .codex
+            ? AppSettings.codexBuiltInDangerousCommandPatterns
+            : nil
+        let customApprovalCommandPatterns = plugin.agentType == .codex
+            ? AppSettings.codexDangerousCommandPatterns
+            : nil
         try writeBridgeProfile(
             AgentBridgeProfile(
                 agentType: plugin.agentType.rawValue,
                 responseMode: baseProfile.responseMode,
                 approvalTools: baseProfile.approvalTools,
                 approvalCommandPatterns: approvalCommandPatterns,
+                builtInApprovalCommandPatterns: builtInApprovalCommandPatterns,
+                customApprovalCommandPatterns: customApprovalCommandPatterns,
                 autoApproveTools: [],
                 autoApproveCommandPatterns: autoApproveCommandPatterns,
                 bridgeLogEnabled: AppSettings.bridgeLogEnabled,
@@ -402,7 +414,17 @@ struct HookPluginContext {
     private func derivedApprovalCommandPatterns(for agentType: AgentPlatform, basePatterns: [String]) -> [String] {
         switch agentType {
         case .codex:
-            return []
+            return Array(
+                NSOrderedSet(
+                    array: basePatterns
+                        + AppSettings.codexBuiltInDangerousCommandPatterns
+                        + AppSettings.codexDangerousCommandPatterns
+                )
+            ) as? [String] ?? (
+                basePatterns
+                    + AppSettings.codexBuiltInDangerousCommandPatterns
+                    + AppSettings.codexDangerousCommandPatterns
+            )
         case .claude, .gemini:
             return basePatterns
         }

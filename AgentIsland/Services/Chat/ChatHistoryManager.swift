@@ -122,9 +122,16 @@ enum ChatHistoryItemType: Equatable, Sendable {
 }
 
 struct ToolCallItem: Equatable, Sendable {
+    struct DetailLocator: Equatable, Sendable {
+        let sessionId: String
+        let cwd: String
+        let toolUseId: String
+    }
+
     let agentType: AgentPlatform
     let name: String
     let input: [String: String]
+    let detailLocator: DetailLocator?
     var status: ToolStatus
     var approvalMode: ApprovalMode?
     var result: String?
@@ -209,6 +216,7 @@ struct ToolCallItem: Equatable, Sendable {
     static func == (lhs: ToolCallItem, rhs: ToolCallItem) -> Bool {
         lhs.name == rhs.name &&
         lhs.input == rhs.input &&
+        lhs.detailLocator == rhs.detailLocator &&
         lhs.status == rhs.status &&
         lhs.approvalMode == rhs.approvalMode &&
         lhs.result == rhs.result &&

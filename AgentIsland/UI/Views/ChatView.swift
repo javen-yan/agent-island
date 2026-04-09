@@ -635,7 +635,12 @@ struct ChatView: View {
             }
         }
 
-        return session.chatItems.filter { !subagentToolIds.contains($0.id) }
+        let filteredItems = session.chatItems.filter { !subagentToolIds.contains($0.id) }
+        let retainedCount = AppSettings.chatHistoryRetentionLimit
+        if filteredItems.count <= retainedCount {
+            return filteredItems
+        }
+        return Array(filteredItems.suffix(retainedCount))
     }
 }
 

@@ -311,4 +311,57 @@ mod tests {
         assert_eq!(payload.internal_event, crate::adapter::INTERNAL_EVENT_PERMISSION_REQUESTED);
         assert_eq!(payload.permission_mode.as_deref(), Some("terminal"));
     }
+
+    #[test]
+    fn codex_chmod_command_maps_to_terminal_confirmation_state() {
+        let input = json!({
+            "session_id": "codex-session",
+            "cwd": "/tmp/project",
+            "method": "PreToolUse",
+            "params": {
+                "name": "Bash",
+                "command": "chmod +x hello.sh",
+                "callId": "codex-call-chmod"
+            }
+        });
+
+        let result = dispatch(AgentSource::Codex, &input, &empty_profile());
+        let payload = result.payload.expect("expected payload");
+
+        assert_eq!(result.permission_decision, None);
+        assert_eq!(payload.status, crate::adapter::HOOK_STATUS_WAITING_FOR_APPROVAL);
+        assert_eq!(payload.internal_event, crate::adapter::INTERNAL_EVENT_PERMISSION_REQUESTED);
+        assert_eq!(payload.permission_mode.as_deref(), Some("terminal"));
+    }
+
+    #[test]
+    fn codex_approval_command_pattern_maps_to_terminal_confirmation_state() {
+        let input = json!({
+            "session_id": "codex-session",
+            "cwd": "/tmp/project",
+            "method": "PreToolUse",
+            "params": {
+                "name": "Bash",
+                "command": "python manage.py migrate",
+                "callId": "codex-call-pattern"
+            }
+        });
+
+        let profile = BridgeProfile {
+            response_mode: Some("codex".to_string()),
+            approval_tools: vec![],
+            approval_command_patterns: vec![r"manage\.py\s+migrate".to_string()],
+            auto_approve_tools: vec![],
+            auto_approve_command_patterns: vec![],
+            bridge_log_enabled: true,
+            bridge_log_level: "info".to_string(),
+        };
+
+        let result = dispatch(AgentSource::Codex, &input, &profile);
+        let payload = result.payload.expect("expected payload");
+
+        assert_eq!(payload.status, crate::adapter::HOOK_STATUS_WAITING_FOR_APPROVAL);
+        assert_eq!(payload.internal_event, crate::adapter::INTERNAL_EVENT_PERMISSION_REQUESTED);
+        assert_eq!(payload.permission_mode.as_deref(), Some("terminal"));
+    }
 }

@@ -40,6 +40,11 @@ enum ToolEventProcessor {
                         agentType: session.agentType,
                         name: tool.toolName,
                         input: extractToolInput(from: tool.arguments),
+                        detailLocator: ToolCallItem.DetailLocator(
+                            sessionId: session.sessionId,
+                            cwd: session.cwd,
+                            toolUseId: toolUseId
+                        ),
                         status: initialStatus,
                         approvalMode: shouldAwaitPermission ? event.approvalMode : nil,
                         result: nil,
@@ -87,6 +92,11 @@ enum ToolEventProcessor {
                     agentType: session.agentType,
                     name: toolName,
                     input: input,
+                    detailLocator: ToolCallItem.DetailLocator(
+                        sessionId: session.sessionId,
+                        cwd: session.cwd,
+                        toolUseId: toolUseId
+                    ),
                     status: initialStatus,
                     approvalMode: approvalMode,
                     result: nil,

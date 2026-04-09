@@ -33,6 +33,12 @@ actor SessionStore {
     /// Sync debounce interval (100ms)
     private let syncDebounceNs: UInt64 = 100_000_000
 
+    /// Default number of recent chat items to retain in memory per session.
+    /// Older stable items are trimmed to keep long-running sessions bounded.
+    private var chatHistoryRetentionLimit: Int {
+        AppSettings.chatHistoryRetentionLimitSnapshot()
+    }
+
     // MARK: - Published State (for UI)
 
     /// Publisher for session state changes (nonisolated for Combine subscription from any context)
@@ -454,6 +460,7 @@ actor SessionStore {
             }
         }
 
+        applyChatHistoryRetention(to: &session)
         sessions[sessionId] = session
     }
 
@@ -581,6 +588,11 @@ actor SessionStore {
                                         agentType: session.agentType,
                                         name: tool.name,
                                         input: tool.input,
+                                        detailLocator: existingTool.detailLocator ?? ToolCallItem.DetailLocator(
+                                            sessionId: session.sessionId,
+                                            cwd: session.cwd,
+                                            toolUseId: tool.id
+                                        ),
                                         status: existingTool.status,
                                         approvalMode: existingTool.approvalMode,
                                         result: existingTool.result,
@@ -595,6 +607,8 @@ actor SessionStore {
                     }
 
                     let item = createChatItem(
+                        sessionId: session.sessionId,
+                        cwd: session.cwd,
                         agentType: session.agentType,
                         from: block,
                         message: message,
@@ -625,6 +639,11 @@ actor SessionStore {
                                         agentType: session.agentType,
                                         name: tool.name,
                                         input: tool.input,
+                                        detailLocator: existingTool.detailLocator ?? ToolCallItem.DetailLocator(
+                                            sessionId: session.sessionId,
+                                            cwd: session.cwd,
+                                            toolUseId: tool.id
+                                        ),
                                         status: existingTool.status,
                                         approvalMode: existingTool.approvalMode,
                                         result: existingTool.result,
@@ -639,6 +658,8 @@ actor SessionStore {
                     }
 
                     let item = createChatItem(
+                        sessionId: session.sessionId,
+                        cwd: session.cwd,
                         agentType: session.agentType,
                         from: block,
                         message: message,
@@ -667,6 +688,7 @@ actor SessionStore {
             structuredResults: payload.structuredResults
         )
 
+        applyChatHistoryRetention(to: &session)
         sessions[payload.sessionId] = session
 
         await emitToolCompletionEvents(
@@ -758,6 +780,8 @@ actor SessionStore {
 
     /// Create chat item (checks existingIds to avoid duplicates)
     private func createChatItem(
+        sessionId: String,
+        cwd: String,
         agentType: AgentPlatform,
         from block: MessageBlock,
         message: ChatMessage,
@@ -803,6 +827,11 @@ actor SessionStore {
                     agentType: agentType,
                     name: tool.name,
                     input: tool.input,
+                    detailLocator: ToolCallItem.DetailLocator(
+                        sessionId: sessionId,
+                        cwd: cwd,
+                        toolUseId: tool.id
+                    ),
                     status: status,
                     approvalMode: nil,
                     result: resultText,
@@ -927,6 +956,8 @@ actor SessionStore {
         for message in messages {
             for (blockIndex, block) in message.content.enumerated() {
                 let item = createChatItem(
+                    sessionId: session.sessionId,
+                    cwd: session.cwd,
                     agentType: session.agentType,
                     from: block,
                     message: message,
@@ -947,7 +978,39 @@ actor SessionStore {
         // Sort by timestamp
         session.chatItems.sort { $0.timestamp < $1.timestamp }
 
+        applyChatHistoryRetention(to: &session)
         sessions[sessionId] = session
+    }
+
+    private func applyChatHistoryRetention(to session: inout SessionState) {
+        let limit = chatHistoryRetentionLimit
+        guard session.chatItems.count > limit else { return }
+
+        let protectedIds = Set(session.chatItems.compactMap { item -> String? in
+            guard case .toolCall(let tool) = item.type else { return nil }
+            switch tool.status {
+            case .running, .waitingForApproval:
+                return item.id
+            case .success, .error, .interrupted:
+                return nil
+            }
+        })
+
+        let trailingIds = Set(session.chatItems.suffix(limit).map(\.id))
+        let retainedIds = trailingIds.union(protectedIds)
+        guard retainedIds.count < session.chatItems.count else { return }
+
+        session.chatItems = session.chatItems.filter { retainedIds.contains($0.id) }
+        pruneToolTracking(for: &session, retainedToolIds: retainedIds)
+    }
+
+    private func pruneToolTracking(for session: inout SessionState, retainedToolIds: Set<String>) {
+        session.toolTracker.seenIds = session.toolTracker.seenIds.filter {
+            retainedToolIds.contains($0) || session.toolTracker.inProgress[$0] != nil
+        }
+        session.toolTracker.inProgress = session.toolTracker.inProgress.filter {
+            retainedToolIds.contains($0.key)
+        }
     }
 
     // MARK: - File Sync Scheduling
@@ -1090,5 +1153,22 @@ actor SessionStore {
     /// Get all current sessions
     func allSessions() -> [SessionState] {
         Array(sessions.values)
+    }
+
+    func applyChatHistoryRetentionToAllSessions() {
+        var mutated = false
+        for sessionId in sessions.keys {
+            guard var session = sessions[sessionId] else { continue }
+            let originalCount = session.chatItems.count
+            applyChatHistoryRetention(to: &session)
+            if session.chatItems.count != originalCount {
+                sessions[sessionId] = session
+                mutated = true
+            }
+        }
+
+        if mutated {
+            publishState()
+        }
     }
 }
